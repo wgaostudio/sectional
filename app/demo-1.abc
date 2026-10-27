@@ -1,0 +1,16 @@
+X:1
+T:Evening Hymn (demo)
+L:1/8
+Q:1/4=80
+M:4/4
+I:linebreak $
+K:F
+V:1 treble-8 nm="Tenor I & II" snm="T."
+ [FA]2 [Fc]2 [Fd]2 [Gc]2 | [Ad]2 [Bd]2 [Gc]4 | [Ac]2 [Ac]2 [Fd]2 [Fc]2 | [GB]2 [Gc]2 [FA]4 |$
+V:2 bass nm="Baritone & Bass" snm="B."
+ [F,,C,]2 [A,,C,]2 [B,,D,]2 [C,E,]2 | [D,F,]2 [B,,F,]2 [C,E,]4 | [F,,C,]2 [A,,E,]2 [B,,D,]2 [A,,C,]2 | [G,,D,]2 [C,E,]2 [F,,C,]4 |$
+V:3 treble nm="Piano" snm="Pno."
+ [FAc]2 [FAc]2 [FBd]2 [EGc]2 | [FAd]2 [FBd]2 [EGc]4 | [FAc]2 [EAc]2 [FBd]2 [FAc]2 | [GBd]2 [EGc]2 [FAc]4 |$
+V:4 bass
+ F,,2 A,,2 B,,2 C,2 | D,2 B,,2 C,4 | F,,2 A,,2 B,,2 A,,2 | G,,2 C,2 F,,4 |$
+%%score [ 1 2 ] { 3 | 4 }

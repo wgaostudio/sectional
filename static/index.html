@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#ffffff">
+<title>Sectional</title>
+<link rel="stylesheet" href="static/style.css">
+</head>
+<body>
+
+<!-- ================= LIBRARY ================= -->
+<section id="library" class="screen" hidden>
+  <header class="lib-top">
+    <div class="brand">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><g stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2 6h20M2 10h20M2 18h20"/></g><rect x="2" y="12.6" width="20" height="2.8" rx="1.4" fill="#ffe14d"/><path d="M2 14h20" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+      Sectional
+    </div>
+    <button id="add-btn" class="pill solid" hidden>Add music</button>
+  </header>
+
+  <!-- first visit: what this is and how to start -->
+  <div id="welcome" class="welcome" hidden>
+    <h1>Practice <mark>your part</mark> at home, with the whole ensemble.</h1>
+    <p class="sub">Add a photo or PDF of your music. Sectional reads it, finds your part and plays it with
+      everyone else's, so you can learn it step by step.</p>
+    <ol class="how">
+      <li><span class="num">1</span><div><strong>Add your music</strong><p>Photos of each page, or a PDF. Reading takes about a minute a page.</p></div></li>
+      <li><span class="num">2</span><div><strong>Pick your part</strong><p>Tell it what you sing or play, and check it found the right staff.</p></div></li>
+      <li><span class="num">3</span><div><strong>Practice in five steps</strong><p>From hearing your part and echoing it, to singing or playing it on your own.</p></div></li>
+    </ol>
+    <div class="welcome-actions">
+      <button id="add-first" class="pill solid big">Add your music</button>
+      <button id="demo-btn" class="pill big">Try a sample piece</button>
+    </div>
+    <p class="muted small">The sample is <i>The Turtle Dove</i>, already read, so you can try practicing right away.</p>
+  </div>
+
+  <!-- your music -->
+  <div id="shelf" hidden>
+    <h2 class="shelf-title">Your music</h2>
+    <div id="songs" class="song-grid"></div>
+  </div>
+</section>
+
+<!-- ================= ADD A SONG ================= -->
+<section id="add" class="screen" hidden>
+  <header class="bar">
+    <button class="pill ghost" data-close-add>Cancel</button>
+    <h2>Add music</h2>
+    <span></span>
+  </header>
+  <div class="add-body">
+    <label id="drop" class="drop">
+      <input id="file-input" type="file" accept="image/*,application/pdf,.heic" multiple hidden>
+      <span class="drop-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="28" height="28"><path fill="currentColor" d="M11 16V7.8L8.4 10.4 7 9l5-5 5 5-1.4 1.4L13 7.8V16h-2Zm-6 4q-.8 0-1.4-.6Q3 18.8 3 18v-3h2v3h14v-3h2v3q0 .8-.6 1.4-.6.6-1.4.6H5Z"/></svg>
+      </span>
+      <strong>Choose photos or a PDF</strong>
+      <span class="muted">Or drop them here. Photograph each page flat, in good light.</span>
+    </label>
+    <div id="checking" class="checking" hidden>
+      <div class="spinner" aria-hidden="true"></div>
+      <p>Looking through the pages…</p>
+    </div>
+    <div id="pick-pages" hidden>
+      <h3>Which pages should be read?</h3>
+      <p class="muted">Pages where no music was found are left out. Tap a page to change that.</p>
+      <div id="page-picks" class="page-picks"></div>
+      <label class="field-label" for="title-input">Title</label>
+      <input id="title-input" class="field" type="text" placeholder="e.g. The Turtle Dove" autocomplete="off">
+      <div class="add-actions">
+        <button id="add-more" class="pill">Add more pages</button>
+        <button id="read-btn" class="pill solid">Read the music</button>
+      </div>
+      <p class="muted small">Reading takes about a minute per page. You can leave and come back.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= SONG ================= -->
+<section id="song" class="screen" hidden>
+  <header class="bar song-bar">
+    <button id="back" class="icon-btn" aria-label="Back to your music">
+      <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M15.4 5.4 14 4l-8 8 8 8 1.4-1.4L8.8 12z"/></svg>
+    </button>
+    <h1 id="song-title" class="song-title" contenteditable="plaintext-only" spellcheck="false"></h1>
+    <button id="part-chip" class="pill chip" hidden></button>
+    <div class="menu-wrap">
+      <button id="menu-btn" class="icon-btn" aria-label="More" aria-haspopup="menu" aria-expanded="false">
+        <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M6 14a2 2 0 1 1 0-4 2 2 0 0 1 0 4Zm6 0a2 2 0 1 1 0-4 2 2 0 0 1 0 4Zm6 0a2 2 0 1 1 0-4 2 2 0 0 1 0 4Z"/></svg>
+      </button>
+      <div id="menu" class="menu" role="menu" hidden>
+        <button role="menuitem" data-action="notes">Check the notes the app read</button>
+        <button role="menuitem" data-action="missed">Check the reading again</button>
+        <button role="menuitem" data-action="reread">Read the music again</button>
+        <button role="menuitem" data-action="voice">Change what I sing or play</button>
+        <button role="menuitem" data-action="delete" class="danger">Delete this piece</button>
+      </div>
+    </div>
+  </header>
+
+  <div class="song-main">
+    <div class="pages-col">
+      <div id="turn" class="turn" role="status" aria-live="polite" hidden></div>
+      <div id="pages" class="pages"></div>
+      <div id="banner" class="banner" hidden></div>
+    </div>
+
+    <aside id="panel" class="panel">
+      <section class="panel-sec">
+        <div class="sec-head">
+          <h3>Practicing</h3>
+          <div class="nav-lines">
+            <button id="prev-line" class="icon-btn small" aria-label="Previous line">
+              <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M15.4 5.4 14 4l-8 8 8 8 1.4-1.4L8.8 12z"/></svg>
+            </button>
+            <button id="next-line" class="icon-btn small" aria-label="Next line">
+              <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M8.6 18.6 10 20l8-8-8-8-1.4 1.4 6.6 6.6z"/></svg>
+            </button>
+          </div>
+        </div>
+        <p id="range-text" class="range-text">—</p>
+        <div class="range-btns">
+          <button id="range-line" class="pill small">This line</button>
+          <button id="range-song" class="pill small">Whole piece</button>
+          <button id="range-bars" class="pill small">Bars…</button>
+        </div>
+        <form id="bars-form" class="bars-form" hidden>
+          <label>From bar <input id="bar-from" type="number" min="1" inputmode="numeric"></label>
+          <label>to <input id="bar-to" type="number" min="1" inputmode="numeric"></label>
+          <button class="pill small solid" type="submit">Set</button>
+        </form>
+      </section>
+
+      <section class="panel-sec">
+        <h3>Steps</h3>
+        <ol id="steps" class="steps"></ol>
+        <p id="step-hint" class="muted small step-hint"></p>
+      </section>
+
+      <section class="panel-sec">
+        <h3>Sound</h3>
+        <label class="slider-row"><span>My part</span><input id="vol-mine" type="range" min="0" max="100" value="90"><output id="vol-mine-out"></output></label>
+        <label class="slider-row"><span>Everyone else</span><input id="vol-others" type="range" min="0" max="100" value="45"><output id="vol-others-out"></output></label>
+        <div class="speed-row">
+          <span>Speed</span>
+          <div id="speed" class="seg" role="radiogroup" aria-label="Speed">
+            <button data-speed="60">60%</button><button data-speed="75">75%</button><button data-speed="90">90%</button><button data-speed="100">100%</button>
+          </div>
+        </div>
+        <details class="more">
+          <summary>More sound settings</summary>
+          <label class="check-row"><input id="count-in" type="checkbox" checked> Count in before playing</label>
+          <label class="check-row"><input id="clicks" type="checkbox"> Quiet beat clicks while singing</label>
+          <label class="check-row"><input id="phrasing" type="checkbox" checked> Natural phrasing (stress the first beat of each bar)</label>
+          <label class="field-row">My part sounds like
+            <select id="inst-mine" class="field">
+              <option value="71">Clarinet</option><option value="53">Voice “ooh”</option><option value="52">Choir “aah”</option><option value="19">Organ</option><option value="0">Piano (long notes fade)</option>
+            </select>
+          </label>
+          <label class="field-row">Everyone else sounds like
+            <select id="inst-others" class="field">
+              <option value="52">Choir “aah”</option><option value="53">Voice “ooh”</option><option value="19">Organ</option><option value="71">Clarinet</option><option value="0">Piano (long notes fade)</option>
+            </select>
+          </label>
+          <label class="field-row">Tempo at 100% (beats per minute)
+            <input id="bpm" class="field" type="number" min="30" max="240">
+          </label>
+        </details>
+      </section>
+    </aside>
+  </div>
+
+  <footer class="transport">
+    <button id="play" class="play" aria-label="Play">
+      <svg class="i-play" viewBox="0 0 24 24" width="28" height="28"><path fill="currentColor" d="M8 5.5v13l10.5-6.5z"/></svg>
+      <svg class="i-pause" viewBox="0 0 24 24" width="28" height="28"><path fill="currentColor" d="M7 5h3.5v14H7zm6.5 0H17v14h-3.5z"/></svg>
+    </button>
+    <div class="t-mid">
+      <div class="t-status"><span id="now-text">Ready</span><span id="round-text" class="muted"></span></div>
+      <div id="timeline" class="timeline" aria-label="Song timeline"></div>
+    </div>
+    <button id="my-note" class="pill">My note</button>
+  </footer>
+</section>
+
+<!-- ================= DIALOGS ================= -->
+<dialog id="voice-dlg" class="dlg">
+  <h2>What do you sing or play?</h2>
+  <p class="muted">The app uses this to find your line in each piece, and to play a transposing instrument's part at the pitch it sounds. You can still pick a different line in any piece.</p>
+  <div id="voice-opts" class="voice-opts"></div>
+</dialog>
+
+<dialog id="notes-dlg" class="dlg wide">
+  <div class="dlg-head">
+    <h2>Notes the app read</h2>
+    <button class="icon-btn" data-close aria-label="Close">
+      <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M19 6.4 17.6 5 12 10.6 6.4 5 5 6.4 10.6 12 5 17.6 6.4 19 12 13.4 17.6 19 19 17.6 13.4 12z"/></svg>
+    </button>
+  </div>
+  <p class="muted">Your part is in black, the others in grey. If something sounds wrong in practice, compare it with your copy here.</p>
+  <div id="notes-score" class="notes-score"></div>
+  <details class="more">
+    <summary>Edit the notes (ABC notation)</summary>
+    <textarea id="abc-edit" spellcheck="false" autocapitalize="off"></textarea>
+    <div class="add-actions"><button id="abc-save" class="pill solid small">Save changes</button><span id="abc-msg" class="muted small"></span></div>
+  </details>
+</dialog>
+
+<div id="toast" class="toast" role="status" hidden></div>
+
+<script src="static/vendor/abcjs-basic-min.js"></script>
+<script src="static/parts.js"></script>
+<script src="static/synth.js"></script>
+<script src="static/player.js"></script>
+<script src="static/app.js"></script>
+</body>
+</html>

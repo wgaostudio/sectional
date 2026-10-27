@@ -1,0 +1,10 @@
+torch>=2.4
+transformers==4.54.0
+huggingface_hub>=0.34,<1.0
+ultralytics>=8.3
+fastapi>=0.110
+uvicorn[standard]>=0.29
+python-multipart>=0.0.9
+pillow>=10.0
+pillow-heif>=0.16
+pymupdf>=1.24

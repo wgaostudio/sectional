@@ -1,0 +1,9 @@
+V:1
+ [Fd]2 [Fc]2 [GB]2 [Gc]2 | [Ac]2 [Ad]2 [Bd]2 [Bc]2 | [Ad]2 [Fd]2 [Ac]2 [Bc]2 | [FA]8 |]$
+V:2
+ [B,,D,]2 [A,,C,]2 [G,,D,]2 [C,E,]2 | [F,,C,]2 [D,F,]2 [G,,D,]2 [C,E,]2 | [D,F,]2 [B,,D,]2 [C,F,]2 [C,E,]2 | [F,,C,]8 |]$
+V:3
+ [FBd]2 [FAc]2 [GBd]2 [EGc]2 | [FAc]2 [FAd]2 [GBd]2 [EGBc]2 | [FAd]2 [FBd]2 [FAc]2 [EGBc]2 | [FAc]8 |]$
+V:4
+ B,,2 A,,2 G,,2 C,2 | F,,2 D,2 G,,2 C,2 | D,2 B,,2 C,2 C,2 | F,,8 |]$
+%%score [ 1 2 ] { 3 | 4 }
