@@ -52,7 +52,7 @@ def main():
 
     t = time.time()
     result = omr.ENGINE.transcribe([page], progress=lambda m, f: print(f"  {m}", flush=True),
-                                   debug_dir=ROOT / "selftest-debug")
+                                   reading_dir=ROOT / "selftest-debug")
     (ROOT / "selftest-debug" / "merged.abc").write_text(result.abc)
     pct = score(result.abc, truth)
     print(f"\n  Found {len(result.systems)} of 2 lines of music, {pct:.0%} of the notes match ({time.time() - t:.0f}s).")
