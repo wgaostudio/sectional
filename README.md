@@ -5,7 +5,7 @@ Practice your part at home, with the whole ensemble.
 In a choir, a band or an orchestra, and want to practice at home, but there's no one to play the
 other parts with you? Take a photo of your music: Sectional reads it with the
 [Legato 2](https://huggingface.co/guangyangmusic/legato-2) music-recognition model, finds your part
-(even when two parts share a staff), plays it along with everyone else's, and takes you step by
+(even when several parts share a staff), plays it along with everyone else's, and takes you step by
 step from hearing it to holding it on your own, following along on your page as it plays.
 
 It runs entirely on your own computer, so it's free: no subscription, no account with us.
@@ -80,15 +80,17 @@ without music, like a cover, are left out; tap a page to change that. Pieces are
 2. **Repair.** Staves the reading missed are found by comparing what was read with the ink on the
    page, cut out and read again on their own (`app/repair.py`). Then every bar of every sung staff
    is checked against rules written music almost always keeps (`app/check.py`): each part fills
-   the bar, a tied note carries on at the same pitch, a staff with two parts has two notes or a
-   rest at every moment. Where a bar breaks them, the staff is read again on its own and with its
+   the bar, a tied note carries on at the same pitch, a staff with three parts has three notes or
+   rests at every moment (the number of parts may change from bar to bar). Where a bar breaks them, the staff is read again on its own and with its
    neighbour, and each bar is taken from the reading that keeps the rules best, or that the other
    two agree on.
 3. **Line up.** Every part is measured bar by bar and lined up, so a misread note length can't
    push one part out of step (`app/abc_time.py`). Pick-ups, short bars at the end of a verse and
    stray rests at fermatas are recognized.
-4. **Find your part.** Parts are matched to the staves on the page by clef, and two parts written
-   on one staff are separated into upper and lower notes. Sung lines read in the wrong octave are
+4. **Find your part.** Parts are matched to the staves on the page by clef, using the line with
+   the most staves (other lines may print parts together, or only the piano). Any number of parts
+   written on one staff are separated, top to bottom, even where the number changes along the way:
+   a divisi, or parts joining in unison. Sung lines read in the wrong octave are
    moved into the range singers on that clef actually sing, and parts for transposing instruments
    are played at the pitch they sound (`static/parts.js`).
 5. **Play.** A small sound engine (`static/synth.js`) gives every note its own loudness curve, so a

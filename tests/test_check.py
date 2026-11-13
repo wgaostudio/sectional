@@ -39,3 +39,21 @@ def test_a_stray_third_voice_is_ignored():
     set_key("C")
     r = Reading.build("alone", [["c2 d2 e2 f2 | g8 |$"], ["E2 F2 G2 A2 | B8 |$"], ["x6 G2 | x8 |$"]], U, M)
     assert len(r.segs) == 2
+
+
+def test_a_part_that_comes_in_for_a_few_bars_is_kept():
+    # a divisi: a third part sings the last bar only, filling it
+    set_key("C")
+    r = Reading.build("line", [["c2 d2 e2 f2 | g8 |$"], ["E2 F2 G2 A2 | B8 |$"], ["x8 | d8 |$"]], U, M)
+    assert len(r.segs) == 3
+
+
+def test_three_parts_on_a_staff_are_checked_as_three():
+    from app.check import part_count
+    set_key("C")
+    good = Reading.build("line", [["[ceg]8 | [dfa]4 [ceg]4 |$"]], U, M)
+    assert part_count([good], F(0), F(1)) == 3
+    assert score_bar(good, 1, F(1), F(2), 3, BEAT, F(2))[0] == 0
+    # one of the three parts lost for half the bar
+    bad = Reading.build("line", [["[ceg]8 | [dfa]4 [ce]4 |$"]], U, M)
+    assert score_bar(bad, 1, F(1), F(2), part_count([bad, good], F(1), F(2)), BEAT, F(2))[0] > 0

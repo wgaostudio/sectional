@@ -118,3 +118,56 @@ test("an unnamed staff is read as the player's own part", () => {
   P.applyTransposition(an, "Soprano", 1);                                              // a singer now
   assert.deepStrictEqual(P.staffNotes(an, 1).map((n) => n.pitch), [74, 76, 77, 79]);
 });
+
+// ---------------------------------------------------------------- three or more parts on a staff
+const pitches = (ns) => ns.map((n) => n.pitch);
+
+test("three parts on one staff give three lines, top to bottom", () => {
+  const { an } = load(`X:1\nL:1/4\nM:4/4\nK:C\nV:1 treble nm="Tenors, Baritones & Basses"\n[V:1] [ceg] [dfa] [egb] [fac'] |$\n`);
+  P.mapStaves(an, ["treble"]);
+  const ls = P.lines(an);
+  assert.deepStrictEqual(ls.map((l) => l.part), ["1/3", "2/3", "3/3"]);
+  assert.deepStrictEqual(pitches(P.divide(an, { staff: 1, part: "1/3" }).mine), [79, 81, 83, 84]);
+  assert.deepStrictEqual(pitches(P.divide(an, { staff: 1, part: "2/3" }).mine), [76, 77, 79, 81]);
+  assert.deepStrictEqual(pitches(P.divide(an, { staff: 1, part: "3/3" }).mine), [72, 74, 76, 77]);
+  // a selection saved when the staff was taken for two parts: upper is the top, lower the bottom
+  assert.deepStrictEqual(pitches(P.divide(an, { staff: 1, part: "upper" }).mine), [79, 81, 83, 84]);
+  assert.deepStrictEqual(pitches(P.divide(an, { staff: 1, part: "lower" }).mine), [72, 74, 76, 77]);
+  // names printed on the staff pick the line
+  assert.strictEqual(P.guessLine(an, "Baritone").part, "2/3");
+  assert.strictEqual(P.guessLine(an, "Bass").part, "3/3");
+});
+
+test("the number of parts on a staff can change: two, a divisi into three, unison, two", () => {
+  const { an } = load(`X:1\nL:1/4\nM:4/4\nK:C\nV:1 treble\n[V:1] [ec] [fd] [ge] [fd] | [gec] [afc] [bgd] [c'ge] | c d e f | [ec] [fd] [ge]2 |$\n`);
+  P.mapStaves(an, ["treble"]);
+  assert.deepStrictEqual(P.lines(an).map((l) => l.part), ["1/3", "2/3", "3/3"]);
+  const top = pitches(P.divide(an, { staff: 1, part: "1/3" }).mine);
+  const mid = pitches(P.divide(an, { staff: 1, part: "2/3" }).mine);
+  const bot = pitches(P.divide(an, { staff: 1, part: "3/3" }).mine);
+  // two parts: the middle part sings with the top one; three: each its own; unison: all three
+  assert.deepStrictEqual(top, [76, 77, 79, 77, 79, 81, 83, 84, 72, 74, 76, 77, 76, 77, 79]);
+  assert.deepStrictEqual(mid, [76, 77, 79, 77, 76, 77, 79, 79, 72, 74, 76, 77, 76, 77, 79]);
+  assert.deepStrictEqual(bot, [72, 74, 76, 74, 72, 72, 74, 76, 72, 74, 76, 77, 72, 74, 76]);
+});
+
+test("a part that rests in the reading rests, instead of singing another part's note", () => {
+  const { an } = load(`X:1\nL:1/4\nM:4/4\nK:C\nV:1 treble nm="Sopranos"\nV:2 treble nm="Altos"\n%%score (1 2)\n[V:1] e f g a | g4 |\n[V:2] c d z z | c4 |\n`);
+  P.mapStaves(an, ["treble"]);
+  assert.deepStrictEqual(pitches(P.divide(an, { staff: 1, part: "upper" }).mine), [76, 77, 79, 81, 79]);
+  assert.deepStrictEqual(pitches(P.divide(an, { staff: 1, part: "lower" }).mine), [72, 74, 72]);
+});
+
+test("a held note stays with its part while the others move", () => {
+  const { an } = load(`X:1\nL:1/4\nM:4/4\nK:C\nV:1 treble\nV:2 treble\nV:3 treble\n%%score (1 2 3)\n[V:1] g4 |\n[V:2] e d e f |\n[V:3] c B, C D |\n`);
+  P.mapStaves(an, ["treble"]);
+  assert.deepStrictEqual(pitches(P.divide(an, { staff: 1, part: "1/3" }).mine), [79]);
+  assert.deepStrictEqual(pitches(P.divide(an, { staff: 1, part: "2/3" }).mine), [76, 74, 76, 77]);
+  assert.deepStrictEqual(pitches(P.divide(an, { staff: 1, part: "3/3" }).mine), [72, 59, 60, 62]);
+});
+
+test("a stray chord here and there doesn't make another part", () => {
+  const { an } = load(`X:1\nL:1/4\nM:4/4\nK:C\nV:1 treble\n[V:1] c d e f | g a b c' | [c'e] b a g | f e d c |$\n`);
+  P.mapStaves(an, ["treble"]);
+  assert.deepStrictEqual(P.lines(an).map((l) => l.part), ["all"]);
+});

@@ -275,6 +275,103 @@ def _renumber(s: System, ref: List[List[str]]) -> System:
     return r
 
 
+_NOTE = re.compile(r'"[^"]*"|![^!]*!|\[[A-Za-z]:[^\]]*\]|%.*|([A-Ga-g])([,\']*)')
+_STEP = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}
+
+
+def _median_pitch(lines: List[str]) -> Optional[float]:
+    """Middle pitch (MIDI, accidentals ignored) of a voice's notes, or None if it has none."""
+    ps = []
+    for m in _NOTE.finditer("\n".join(lines)):
+        if m.group(1):
+            p = 60 + _STEP[m.group(1).upper()] + (12 if m.group(1).islower() else 0)
+            ps.append(p + 12 * m.group(2).count("'") - 12 * m.group(2).count(","))
+    return sorted(ps)[len(ps) // 2] if ps else None
+
+
+def _clef_kind(attrs: str) -> Optional[str]:
+    m = re.search(r"\b(treble|bass|alto|tenor)\b", attrs or "")
+    return None if not m else ("bass" if m.group(1) == "bass" else "treble")
+
+
+def _is_piano(attrs: str) -> Optional[bool]:
+    m = re.search(r'\bnm="([^"]*)"', attrs or "")
+    return None if not m else bool(re.search(r"pian|pno|keyb|organ", m.group(1), re.I))
+
+
+def _align_voices(s: System, ref_voices: List[Tuple[str, Optional[float], Optional[str], Optional[bool]]]) -> Dict[str, str]:
+    """Match the voices of a system with fewer staves than the reference to the reference's
+    voices, top to bottom, by pitch, clef and (where named) piano. Two parts printed on one
+    staff here may be on two staves there, or a line may print only the piano.
+    ref_voices: (id, median pitch, clef, piano) top to bottom. Returns {voice: new id}."""
+    mine = [v for st in staves(s.score, s.order) for v in st]
+    M, K = len(mine), len(ref_voices)
+    if not M or not K:
+        return {}
+    feats = []
+    for v in mine:
+        med, clef = _median_pitch(s.voices.get(v, [])), _clef_kind(s.voice_defs.get(v, ""))
+        if clef is None and med is not None:
+            clef = "bass" if med < 57 else "treble"
+        feats.append((med, clef, _is_piano(s.voice_defs.get(v, ""))))
+
+    def cost(i, j):
+        (med, clef, piano), (_, rmed, rclef, rpiano) = feats[i], ref_voices[j]
+        c = 0.0
+        if med is not None and rmed is not None:
+            c += min(12.0, abs(med - rmed) / 2)
+        if clef and rclef and clef != rclef:
+            c += 6
+        if piano is not None and rpiano is not None and piano != rpiano:
+            c += 10
+        return c
+
+    SKIP, EXTRA, INF = 1.0, 8.0, float("inf")
+    # dp[i][j]: voices 0..i placed, voice i on reference voice j
+    dp = [[INF] * K for _ in range(M)]
+    frm = [[-1] * K for _ in range(M)]
+    for j in range(K):
+        dp[0][j] = SKIP * j + cost(0, j)
+    for i in range(1, M):
+        for j in range(K):
+            for k in range(j + 1):          # k == j: a second voice on the same part (extra)
+                c = dp[i - 1][k] + (EXTRA if k == j else SKIP * (j - k - 1)) + cost(i, j)
+                if c < dp[i][j]:
+                    dp[i][j], frm[i][j] = c, k
+    j = min(range(K), key=lambda x: dp[M - 1][x] + SKIP * (K - 1 - x))
+    at = [0] * M
+    for i in range(M - 1, -1, -1):
+        at[i] = j
+        j = frm[i][j]
+    out: Dict[str, str] = {}
+    extra: Dict[str, int] = {}
+    for i, v in enumerate(mine):
+        rid = ref_voices[at[i]][0]
+        if i and at[i] == at[i - 1]:
+            extra[rid] = extra.get(rid, 0) + 1
+            out[v] = f"{rid}x{extra[rid]}"
+        else:
+            out[v] = rid
+    return out
+
+
+def _apply(s: System, mapping: Dict[str, str]) -> System:
+    for v in s.order:
+        mapping.setdefault(v, v if v not in mapping.values() else f"{v}y")
+    if all(k == v for k, v in mapping.items()):
+        return s
+    r = System(header=s.header)
+    for v in s.order:
+        nv = mapping[v]
+        r.order.append(nv)
+        r.voices[nv] = s.voices[v]
+        if v in s.voice_defs:
+            r.voice_defs[nv] = s.voice_defs[v]
+    if s.score is not None:
+        r.score = " ".join(mapping.get(t, t) for t in _TOK.findall(s.score))
+    return r
+
+
 # ----------------------------------------------------------------------------
 # the merge
 # ----------------------------------------------------------------------------
@@ -313,12 +410,29 @@ def merge(outputs: List[str]) -> Merged:
     header = [h for h in header if not h.startswith(("K:", "%%score", "%%staves"))] + [k]
     unit, meter = _parse_header(header)
 
-    ref = staves(systems[0].score, systems[0].order)
-    first = systems[0]
-    parsed = [s if (s is None or s is first) else _renumber(s, ref) for s in parsed]
+    # The reference layout: the system with the most staves (the first of those). Other
+    # systems with as many staves take its voice ids staff by staff; a system with fewer
+    # staves (parts sharing a staff for a while, a piano introduction) is matched to it voice
+    # by voice, so each part keeps one id through the song.
+    pool = [s for s in systems if s.score is not None] or systems
+    first = max(pool, key=lambda s: (len(staves(s.score, s.order)), -systems.index(s)))
+    ref = staves(first.score, first.order)
+    parsed = [s if (s is None or s is first or len(staves(s.score, s.order)) < len(ref)) else _renumber(s, ref)
+              for s in parsed]
+    same = [s for s in parsed if s is not None and len(staves(s.score, s.order)) == len(ref)]
+    ref_voices = []
+    for st in ref:
+        for v in st:
+            meds = [m for m in (_median_pitch(s.voices.get(v, [])) for s in same) if m is not None]
+            attrs = next((s.voice_defs[v] for s in same if v in s.voice_defs), "")
+            med = sorted(meds)[len(meds) // 2] if meds else None
+            clef = _clef_kind(attrs) or (None if med is None else "bass" if med < 57 else "treble")
+            ref_voices.append((v, med, clef, _is_piano(attrs)))
+    parsed = [s if (s is None or len(staves(s.score, s.order)) >= len(ref)) else _apply(s, _align_voices(s, ref_voices))
+              for s in parsed]
     systems = [s for s in parsed if s]
 
-    order: List[str] = []
+    order: List[str] = list(first.order)          # top to bottom, as the reference prints them
     defs: Dict[str, str] = {}
     for s in systems:
         for v in s.order:
@@ -367,16 +481,16 @@ def merge(outputs: List[str]) -> Merged:
         })
         t += sum(bars, Fraction(0))
 
-    # Layout: the first system's staves (its voices are the reference ids), with any extra
-    # voices that were matched to a staff placed on that staff.
-    score = systems[0].score
+    # Layout: the reference system's staves (its voices are the reference ids), with any
+    # extra voices that were matched to a staff placed on that staff.
+    score = first.score
     if score is not None:
         extras: Dict[str, List[str]] = {}
         for v in order:
             m = re.match(r"^(.+?)x\d+$", v)
             if m and m.group(1) in order:
                 extras.setdefault(m.group(1), []).append(v)
-        toks, out, depth = _TOK.findall(balance_score(score, systems[0].order)), [], 0
+        toks, out, depth = _TOK.findall(balance_score(score, first.order)), [], 0
         for t in toks:
             if t == "(":
                 depth += 1

@@ -1,13 +1,13 @@
 """Check every sung staff for signs of a misreading, and fix the bars that fail.
 
-The model reads a whole line of music at once. On busy staves (two parts sharing a staff,
+The model reads a whole line of music at once. On busy staves (parts sharing a staff,
 lyrics, a piano below) it sometimes muddles the parts: a tied whole note in one part becomes a
 half note followed by a note from the other part. Such mistakes break rules that written music
 almost always keeps, so each bar of a staff is scored against them:
 
   hard   each part fills the bar exactly (notes and rests add up to the bar's length);
          a tied note carries on at the same pitch;
-         on a staff with two parts there are two notes, or a rest, at every moment
+         on a staff with n parts (in that bar) there are n notes, or rests, at every moment
   soft   no more notes at once than parts; no leaps of more than a sixth within a part;
          no seconds or sevenths between the parts on a beat
 
@@ -28,7 +28,7 @@ from PIL import Image
 
 from app.abc_merge import parse_system, tidy
 from app.abc_time import _parse_header, align_system, split_bars
-from app.repair import map_voices, note_count, splice, staff_reading
+from app.repair import map_voices, note_count, reference_line, splice, staff_reading
 
 log = logging.getLogger("sectional.check")
 
@@ -90,12 +90,14 @@ class Reading:
         """voices: this staff's parts (music lines). context: the whole system's voices,
         so the parts are lined up exactly as the merge will line them up."""
         r = cls(name, unit)
-        # A staff holds at most two parts. A third voice with only a few notes is the reader
-        # hedging (stray notes copied from a neighbour); leave it out.
+        # A staff can hold any number of parts, and a part may sing only a few bars (a divisi).
+        # But a voice with few notes, dotted among rests, is the reader hedging (stray notes
+        # copied from a neighbour); leave it out.
         counts = [note_count(v) for v in voices]
-        if len(voices) >= 3:
+        if len(voices) >= 2:
             most = max(counts)
-            voices = [v for v, c in zip(voices, counts) if c >= 0.35 * most] or voices
+            voices = [v for v, c in zip(voices, counts)
+                      if c >= 0.35 * most or (c and filled(v, unit, meter) >= 0.6)] or voices
         ids = [str(i) for i in range(len(voices))]
         allv = dict(zip(ids, voices))
         order = list(ids)
@@ -142,16 +144,43 @@ class Reading:
         return {(n.t0 - t0, p, n.t1 - n.t0) for n in self.notes if t0 <= n.t0 < t1 for p in n.pitches}
 
 
-def two_parts(readings: List[Reading]) -> bool:
-    """Does this staff carry two parts on this line? (notes stacked, or two voices with notes)"""
+def filled(lines: List[str], unit: Fraction, meter: Fraction) -> float:
+    """How much of the bars a voice sings in are notes (not rests): a part that comes in for a
+    few bars fills them; stray notes are dotted among rests."""
+    evs: list = []
+    _, durs, _ = split_bars("\n".join(lines), unit, meter, evs)
+    sung = total = Fraction(0)
+    for d, ev in zip(durs, evs):
+        notes = sum((e["t1"] - e["t0"] for e in ev if e["kind"] == "note"), Fraction(0))
+        if notes:
+            sung += notes
+            total += d
+    return float(sung / total) if total else 0.0
+
+
+def part_count(readings: List[Reading], t0: Fraction, t1: Fraction) -> int:
+    """How many parts this staff carries in the bar [t0, t1): the voices with notes in it, or
+    the notes stacked at once on a good share of its beats (chords in one voice), whichever
+    is more; the most any reading finds. The number can change from bar to bar (a divisi, or
+    the parts coming together in unison)."""
+    most = 1
     for r in readings:
-        voices = {n.voice for n in r.notes}
-        onsets: Dict[Fraction, set] = {}
-        for n in r.notes:
-            onsets.setdefault(n.t0, set()).update(n.pitches)
-        if len(voices) >= 2 or (onsets and sum(len(v) >= 2 for v in onsets.values()) / len(onsets) > 0.25):
-            return True
-    return False
+        inside = [n for n in r.notes if t0 <= n.t0 < t1]
+        # a part doesn't drop out for a single bar without rests: a voice singing in the bars
+        # either side counts here too, so a part the reading lost in this bar is still missed
+        d = t1 - t0
+        before = {n.voice for n in r.notes if t0 - d <= n.t0 < t0}
+        after = {n.voice for n in r.notes if t1 <= n.t0 < t1 + d}
+        voices = len({n.voice for n in inside} | (before & after))
+        onsets = sorted({n.t0 for n in inside})
+        sizes = [len({p for n in r.notes if n.t0 <= a < n.t1 for p in n.pitches}) for a in onsets]
+        stacked = 1
+        for k in range(max(sizes, default=1), 1, -1):
+            if sum(x >= k for x in sizes) / len(sizes) > 0.25:
+                stacked = k
+                break
+        most = max(most, voices, stacked)
+    return most
 
 
 def score_bar(r: Reading, k: int, t0: Fraction, t1: Fraction, parts: int, beat: Fraction,
@@ -180,7 +209,8 @@ def score_bar(r: Reading, k: int, t0: Fraction, t1: Fraction, parts: int, beat: 
         gap = max(0, parts - len(sounding) - len(resting))
         hard += float(gap * (b - a) / beat)
         soft += 0.5 * float(max(0, len(sounding) - parts) * (b - a) / beat)
-    # within each part: no big leaps; between the parts: no 2nds/7ths on a beat
+    # within the outer parts: no big leaps; between two parts: no 2nds/7ths on a beat (with
+    # three or more, a second inside the chord is normal)
     onsets = sorted({n.t0 for n in r.notes if t0 <= n.t0 < t1})
     prev_hi = prev_lo = None
     for at in onsets:
@@ -190,7 +220,7 @@ def score_bar(r: Reading, k: int, t0: Fraction, t1: Fraction, parts: int, beat: 
         hi, lo = sounding[-1], sounding[0]
         if prev_hi is not None and abs(hi - prev_hi) > 9:
             soft += 0.5
-        if parts == 2 and prev_lo is not None and len(sounding) > 1 and abs(lo - prev_lo) > 9:
+        if parts >= 2 and prev_lo is not None and len(sounding) > 1 and abs(lo - prev_lo) > 9:
             soft += 0.5
         if parts == 2 and len(sounding) > 1 and ((at - t0) / beat).denominator == 1 and (hi - lo) % 12 in (1, 2, 10, 11):
             soft += 0.25
@@ -204,7 +234,6 @@ def agreement(a: set, b: set) -> float:
 
 def choose(readings: List[Reading], bars: List[Fraction], beat: Fraction) -> Tuple[List[str], List[float]]:
     """The reading to take each bar from, and how far the chosen bar still breaks the rules."""
-    parts = 2 if two_parts(readings) else 1
     end = sum(bars, Fraction(0))
     picks, left = [], []
     t = Fraction(0)
@@ -217,6 +246,7 @@ def choose(readings: List[Reading], bars: List[Fraction], beat: Fraction) -> Tup
             left.append(0.0)
             continue
         notes = {r.name: r.notes_in(t0, t1) for r in readings}
+        parts = part_count(readings, t0, t1)
 
         def key(r):
             h, s = score_bar(r, k, t0, t1, parts, beat, end)
@@ -297,7 +327,7 @@ def check_song(song_dir: Path, meta: dict, engine, progress: Callable[[str, floa
             if v not in order:
                 order.append(v)
             total[v] = total.get(v, 0) + note_count(parsed[k].voices[v])
-    ref = next((L for L in lines if L.get("staves") and all(st.get("clef") for st in L["staves"])), None)
+    ref = reference_line(lines)
     if not ref:
         return {"fixed": [], "unsure": {}}
     clefs = [st["clef"] for st in ref["staves"]]

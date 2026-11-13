@@ -37,6 +37,18 @@ def note_count(lines: List[str]) -> int:
     return len(re.findall(r"[A-Ga-g]", text))
 
 
+def reference_line(lines: List[dict]) -> Optional[dict]:
+    """The line whose staves stand for the song's staves: the one with the most staves (all
+    clefs found). Other lines may print fewer: parts sharing a staff for a while, or only the
+    piano. The practice screen and the merge choose it the same way."""
+    best = None
+    for L in lines:
+        st = L.get("staves") or []
+        if st and all(s.get("clef") for s in st) and (best is None or len(st) > len(best["staves"])):
+            best = L
+    return best
+
+
 def map_voices(order: List[str], defs: Dict[str, str], counts: Dict[str, int],
                page_clefs: List[str]) -> Tuple[Dict[str, int], int]:
     """Match the reading's voices (in order) to the page's staves by clef; the same rule the
@@ -106,7 +118,7 @@ def find_missing(meta: dict, systems: Dict[int, str], page_images: Callable[[int
             if v not in order:
                 order.append(v)
             total[v] = total.get(v, 0) + note_count(s.voices[v])
-    ref = next((L for L in meta.get("lines") or [] if L.get("staves") and all(st.get("clef") for st in L["staves"])), None)
+    ref = reference_line(meta.get("lines") or [])
     if not ref:
         return []
     clefs = [st["clef"] for st in ref["staves"]]

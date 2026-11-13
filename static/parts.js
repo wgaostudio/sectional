@@ -482,44 +482,147 @@
   }
 
   /**
-   * Two parts written on one staff. Where notes are stacked, the top one is the upper part
-   * and the bottom one the lower part. A note on its own (the other part resting, or a note
-   * the reading missed) goes to the part it's closest to in pitch, following each part's
-   * line, so a part never jumps across to the other one. A unison belongs to both.
+   * How many parts are written on a staff: the most notes sounding at once that the music
+   * keeps up, either on a good share of its notes or for a stretch of several notes in a row
+   * (a divisi of a few bars). A chord that turns up here and there is a misreading, not a part.
    */
-  function assignParts(notes) {
-    const upper = new Set(), lower = new Set();
-    let lastU = null, lastL = null;
-    const byStart = new Map();
-    for (const n of notes) {
-      const k = n.start.toFixed(5);
-      if (!byStart.has(k)) byStart.set(k, []);
-      byStart.get(k).push(n);
+  const RUN = 4;
+  function onsetCounts(notes) {
+    const starts = [...new Set(notes.map((n) => n.start.toFixed(5)))].map(Number).sort((a, b) => a - b);
+    return starts.map((t) => {
+      const set = new Set();
+      for (const o of notes) {
+        if (o.start > t + 1e-6) break;
+        if (o.start + o.duration > t + 1e-6) set.add(o.pitch);
+      }
+      return set.size;
+    });
+  }
+  function partCount(notes, typical) {
+    if (!notes.length) return 0;
+    const counts = onsetCounts(notes);
+    for (let k = Math.max(...counts); k >= 2; k--) {
+      if (k === 2 && stacking(notes) > 0.3) return 2;
+      if (counts.filter((c) => c >= k).length / counts.length > 0.3) return k;
+      if (typical) continue;                  // most of the time, leaving out a short divisi
+      let run = 0, best = 0;
+      for (const c of counts) { run = c >= k ? run + 1 : 0; best = Math.max(best, run); }
+      if (best >= RUN) return k;
     }
+    return 1;
+  }
+
+  /**
+   * Parts written on one staff, top to bottom. Returns an array of n sets of notes (n = the
+   * staff's number of parts). The number of parts can change along the way (a divisi, or the
+   * parts joining in unison): at each moment the notes sounding are shared out among the
+   * parts, top note to the top part, without parts crossing, each part following its own line.
+   * Where there are fewer notes than parts, a part sings along with the nearest one (a unison,
+   * the way one notehead serves two parts) or rests, if the reading gives that part a rest.
+   */
+  function assignParts(notes, n) {
+    n = n || partCount(notes);
+    const out = Array.from({ length: Math.max(1, n) }, () => new Set());
+    if (!notes.length) return out;
+    if (n <= 1) { notes.forEach((x) => out[0].add(x)); return out; }
+    const byStart = new Map();
+    for (const x of notes) {
+      const k = x.start.toFixed(5);
+      if (!byStart.has(k)) byStart.set(k, []);
+      byStart.get(k).push(x);
+    }
+    const last = new Array(n).fill(null);     // each part's last pitch
+    const cur = new Array(n).fill(null);      // each part's current note
+    const joinsAbove = new Array(n).fill(false); // last time, did part l sing the part above's note
+    // start each part from the first moment with every part singing (else spread evenly)
     for (const group of byStart.values()) {
-      const ps = [...soundingAt(notes, group[0])].concat(group.map((n) => n.pitch));
-      const hi = Math.max(...ps), lo = Math.min(...ps);
-      for (const n of group) {
-        if (hi !== lo) {
-          if (n.pitch === hi) { upper.add(n); lastU = n.pitch; continue; }
-          if (n.pitch === lo) { lower.add(n); lastL = n.pitch; continue; }
+      const ps = [...new Set(group.map((x) => x.pitch))].sort((a, b) => b - a);
+      if (ps.length >= n) { for (let l = 0; l < n; l++) last[l] = ps[Math.round(l * (ps.length - 1) / (n - 1))]; break; }
+    }
+    const BIG = 1e6, SKIP = 20, STEAL = 6, JOIN = 50;
+    for (const group of byStart.values()) {
+      const t = group[0].start;
+      // what's still sounding from before: a note held by part l
+      const held = new Map();                 // pitch -> set of parts holding it
+      for (let l = 0; l < n; l++) {
+        const c = cur[l];
+        if (c && c.start < t - 1e-6 && c.start + c.duration > t + 1e-6) {
+          if (!held.has(c.pitch)) held.set(c.pitch, new Set());
+          held.get(c.pitch).add(l);
+        } else cur[l] = null;
+      }
+      const fresh = [...new Set(group.map((x) => x.pitch))];
+      const items = [...new Set([...fresh, ...held.keys()])].sort((a, b) => b - a)
+        .map((p) => ({ p, isNew: fresh.includes(p), holders: held.get(p) || new Set() }));
+      // a part may rest only where the reading has it rest: a voice of the staff with nothing
+      // sounding now that sings within a bar or so. Written as chords in one voice, a single
+      // note is everyone's (unison).
+      const near = new Set(), sounding = new Set();
+      for (const x of notes) {
+        if (x.start <= t + 1e-6 && x.start + x.duration > t + 1e-6) sounding.add(x.voice);
+        if (Math.abs(x.start - t) <= 1 + 1e-6 || (x.start < t && x.start + x.duration > t - 1)) near.add(x.voice);
+      }
+      const rest = [...near].some((v) => !sounding.has(v)) ? 1.5 : 30;
+      const cost = (l, i) => {
+        const it = items[i];
+        const holding = cur[l] !== null;
+        if (!it.isNew) return it.holders.has(l) ? 0 : JOIN;
+        return (last[l] === null ? 0 : Math.abs(it.p - last[l])) + (holding && !it.holders.has(l) ? STEAL : 0);
+      };
+      const restCost = (l) => (cur[l] !== null ? BIG : rest);
+      const skipCost = (i) => (items[i].isNew ? SKIP : 0);
+      // dp over parts top to bottom; state: the item the part above took (-1: none yet)
+      const m = items.length;
+      let dp = new Array(m + 1).fill(BIG);   // index k+1 for item k
+      dp[0] = 0;
+      const back = [];
+      for (let l = 0; l < n; l++) {
+        const nd = new Array(m + 1).fill(BIG), nb = new Array(m + 1).fill(null);
+        for (let k = -1; k < m; k++) {
+          const base = dp[k + 1];
+          if (base >= BIG) continue;
+          // rest
+          const r = base + restCost(l);
+          if (r < nd[k + 1]) { nd[k + 1] = r; nb[k + 1] = { k, take: -1 }; }
+          // share the item above, or take a lower one (skipping the ones between)
+          for (let i = Math.max(0, k); i < m; i++) {
+            let c = base + cost(l, i);
+            if (l > 0 && items[i].isNew && (i === k) !== joinsAbove[l]) c += 1.5;   // keep company
+            for (let s = k + 1; s < i; s++) c += skipCost(s);
+            if (c < nd[i + 1]) { nd[i + 1] = c; nb[i + 1] = { k, take: i }; }
+          }
         }
-        // on its own (or in the middle of three): follow the nearer line
-        const dU = lastU === null ? Infinity : Math.abs(n.pitch - lastU);
-        const dL = lastL === null ? Infinity : Math.abs(n.pitch - lastL);
-        if (lastU !== null && lastL !== null && lastU === lastL && dU === dL) { upper.add(n); lower.add(n); }
-        else if (dU === Infinity && dL === Infinity) { upper.add(n); lower.add(n); lastU = lastL = n.pitch; }
-        else if (dU <= dL) { upper.add(n); lastU = n.pitch; }
-        else { lower.add(n); lastL = n.pitch; }
+        dp = nd;
+        back.push(nb);
+      }
+      let end = 0, bestC = BIG;
+      for (let k = -1; k < m; k++) {
+        let c = dp[k + 1];
+        for (let s = k + 1; s < m; s++) c += skipCost(s);
+        if (c < bestC) { bestC = c; end = k; }
+      }
+      if (bestC >= BIG) continue;               // can't happen (a part can always keep its note)
+      const take = new Array(n).fill(-1);
+      for (let l = n - 1, k = end; l >= 0; l--) {
+        const b = back[l][k + 1];
+        take[l] = b.take;
+        k = b.k;
+      }
+      for (let l = 0; l < n; l++) {
+        const i = take[l];
+        if (i < 0 || !items[i].isNew) continue;
+        joinsAbove[l] = l > 0 && take[l - 1] === i;
+        for (const x of group) if (x.pitch === items[i].p) { out[l].add(x); cur[l] = x; }
+        last[l] = items[i].p;
       }
     }
-    return { upper, lower };
+    return out;
   }
 
   /**
    * One singer sings one note at a time: where a part still has two notes starting together
-   * (a third note in a chord, or two voices on the staff with different rhythms), keep the
-   * top one (bottom one for the lower part), and end each note when the next one starts.
+   * (a misread extra note), keep the top one (bottom one for the lowest part), and end each
+   * note when the next one starts.
    */
   function monophonic(notes, low) {
     const byStart = new Map();
@@ -535,11 +638,29 @@
     });
   }
 
+  /**
+   * Which of a staff's n parts a selection means, counted from the top (0). Parts are named
+   * "all" (a staff with one part), "upper"/"lower" (two parts; saved selections from before
+   * keep working on a staff now found to have more), or "k/m" (part k of m, from the top).
+   */
+  function partIndex(part, n) {
+    if (!part || part === "all" || n <= 1) return 0;
+    if (part === "upper") return 0;
+    if (part === "lower") return n - 1;
+    const m = /^(\d+)\/(\d+)$/.exec(part);
+    if (!m) return 0;
+    const k = +m[1] - 1, of = +m[2];
+    if (of === n) return Math.min(n - 1, k);
+    return of > 1 ? Math.round(k * (n - 1) / (of - 1)) : 0;
+  }
+  const partName = (k, n) => (n === 1 ? "all" : n === 2 ? (k === 0 ? "upper" : "lower") : `${k + 1}/${n}`);
+
   function pickPart(notes, part) {
-    if (!part || part === "all") return monophonic(notes, false);
-    const a = assignParts(notes);
-    const keep = part === "upper" ? a.upper : a.lower;
-    return monophonic(notes.filter((n) => keep.has(n)), part === "lower");
+    const n = partCount(notes);
+    if (!part || part === "all" || n <= 1) return monophonic(notes, false);
+    const k = partIndex(part, n);
+    const keep = assignParts(notes, n)[k];
+    return monophonic(notes.filter((x) => keep.has(x)), k === n - 1);
   }
 
   /** Share of notes on a staff that have another note stacked with them. */
@@ -549,8 +670,9 @@
   }
 
   /**
-   * Singable lines, top to bottom: {staff, part: "upper"|"lower"|"all", label}. A staff with
-   * two stacked parts gives two lines. With staffNum, only that staff (piano included).
+   * Singable lines, top to bottom: {staff, part, label, k, of}. A staff with n parts gives n
+   * lines (part "upper"/"lower" for two, "k/n" for more; see partIndex). With staffNum, only
+   * that staff (piano included).
    */
   function lines(analysis, staffNum) {
     let staves;
@@ -566,12 +688,9 @@
       const notes = staffNotes(analysis, staff);
       if (!notes.length) continue;
       const label = staffLabel(analysis, staff);
-      if (stacking(notes) > 0.3) {
-        out.push({ staff, part: "upper", label });
-        out.push({ staff, part: "lower", label });
-      } else {
-        out.push({ staff, part: "all", label });
-      }
+      const n = partCount(notes);
+      const usual = partCount(notes, true);
+      for (let k = 0; k < n; k++) out.push({ staff, part: partName(k, n), label, k, of: n, usual });
     }
     return out;
   }
@@ -606,20 +725,35 @@
     }
     const role = (voiceType || "").toLowerCase().replace(/\s*\d$/, "");
     const named = [...new Set(all.map((l) => l.staff))].filter((st) => ((analysis.staffNames || {})[st] || []).includes(role));
-    // names only count on a choir staff (two stacked parts); a solo line may carry them too
-    const two = named.filter((st) => all.filter((l) => l.staff === st).length === 2 && (analysis.staffNames[st] || []).length >= 2);
-    if (two.length) {
-      const staff = two[0];
+    // names only count on a staff shared by several parts; a solo line may carry them too
+    const shared = named.filter((st) => all.filter((l) => l.staff === st).length >= 2 && (analysis.staffNames[st] || []).length >= 2);
+    if (shared.length) {
+      const staff = shared[0];
       const ls = all.filter((l) => l.staff === staff);
       const names = analysis.staffNames[staff];
-      let part;
-      if (names.length >= 2) part = names.indexOf(role) === 0 ? "upper" : "lower";
-      else part = /1$/.test(voiceType) ? "upper" : "lower";
-      return { ...ls.find((l) => l.part === part), why: "name" };
+      // names are printed top to bottom; with more parts than names (a divisi), spread them out
+      const at = (i) => (names.length === ls.length ? i : Math.round(i * (ls.length - 1) / (names.length - 1)));
+      const i = names.indexOf(role);
+      let k = at(i);
+      // "Tenor 2" on a divided tenor line: the part below the first tenors
+      if (/2$/.test(voiceType) && ls.length > names.length && k + 1 < ls.length && (i + 1 >= names.length || at(i + 1) > k + 1)) k += 1;
+      return { ...ls[k], why: "name" };
     }
-    const choir = all.length > 4 ? all.slice(-4) : all;
+    // by rank, over each staff's usual lines: a short divisi doesn't make another part of the choir
+    const usual = [];
+    for (const st of [...new Set(all.map((l) => l.staff))]) {
+      const ls = all.filter((l) => l.staff === st);
+      const m = ls[0].usual;
+      for (let j = 0; j < m; j++) usual.push({ st, j, m, ls });
+    }
+    const choir = usual.length > 4 ? usual.slice(-4) : usual;
     const rank = VOICE_RANK[voiceType] ?? 2 / 3;
-    return { ...choir[Math.round(rank * (choir.length - 1))], why: "rank" };
+    const u = choir[Math.round(rank * (choir.length - 1))];
+    const n = u.ls.length;
+    // that staff's lines for it: spread out; one usual line split for a while: the lower
+    // division for a bass or a "2", the upper one otherwise
+    let k = u.m > 1 ? Math.round(u.j * (n - 1) / (u.m - 1)) : (/2$/.test(voiceType) || voiceType === "Bass" ? n - 1 : 0);
+    return { ...u.ls[k], why: "rank" };
   }
 
   /**
@@ -927,5 +1061,5 @@
   }
 
   return { sanitize, voiceDefs, voiceLocator, analyze, mainParts, lines, guessLine, divide,
-           staffNotes, pickPart, assignParts, expression, applyTransposition, writtenShift, staffInstrument, instrumentOf, isInstrument, INSTRUMENTS, sounded, staffLabel, applyVoicing, mapStaves, beatOf, buildPass, firstNote, pitchName, FADE, VOICE_RANK, MALE };
+           staffNotes, pickPart, assignParts, partCount, partIndex, expression, applyTransposition, writtenShift, staffInstrument, instrumentOf, isInstrument, INSTRUMENTS, sounded, staffLabel, applyVoicing, mapStaves, beatOf, buildPass, firstNote, pitchName, FADE, VOICE_RANK, MALE };
 });

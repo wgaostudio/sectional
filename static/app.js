@@ -307,8 +307,10 @@
       return;
     }
     S.abc = abc;
-    // match the reading's voices to the staves printed on the page (by order and clef)
-    const ref = (S.lines || []).find((L) => L.staves && L.staves.length && L.staves.every((st) => st.clef));
+    // match the reading's voices to the staves printed on the page (by order and clef), on the
+    // line with the most staves: other lines may print some parts together, or only the piano
+    const ref = (S.lines || []).filter((L) => L.staves && L.staves.length && L.staves.every((st) => st.clef))
+      .reduce((a, L) => (!a || L.staves.length > a.staves.length ? L : a), null);
     if (ref) Parts.mapStaves(S.analysis, ref.staves.map((st) => st.clef));
     Parts.expression(S.analysis, abc, (S.lines || []).map((L) => L.start));
     buildBars();
@@ -464,13 +466,28 @@
     return pt.matrixTransform(svg.getScreenCTM().inverse());
   }
 
-  /** Which page staff (index) holds my part on line li. */
+  /**
+   * The song's staves (as numbered on the line with the most staves) printed on staff si of
+   * line li. A line can print fewer staves than that (two parts sharing a staff for a while,
+   * or a piano introduction): the voices the reading put on each staff of the line say which.
+   */
+  function songStavesOn(li, si) {
+    const L = S.lines[li];
+    const st = L.staves[si];
+    const ids = new Set((st && st.voices) || []);
+    const found = [...new Set(S.analysis.parts.filter((p) => ids.has(p.id)).map((p) => p.staff))].sort((a, b) => a - b);
+    if (found.length) return found;
+    // no voices on record for this line: staves are numbered top to bottom, as printed
+    return L.staves.length === (S.analysis.pageStaves || L.staves.length) ? [si + 1] : [];
+  }
+
+  /** Which page staff (index) holds my part on line li (-1: not on this line). */
   function myStaffOn(li) {
     const sel = S.prefs && S.prefs.sel;
-    if (!sel) return -1;
+    if (!sel || !S.analysis) return -1;
     const L = S.lines[li];
-    const idx = (sel.staff || 1) - 1;          // staves are numbered top to bottom, as printed
-    return idx < L.staves.length ? idx : -1;
+    for (let si = 0; si < L.staves.length; si++) if (songStavesOn(li, si).includes(sel.staff || 1)) return si;
+    return -1;
   }
 
   function drawStatic() {
@@ -630,9 +647,23 @@
   }
 
   // ---------------------------------------------------------------- your part
+  /** "upper notes", "middle notes", "2nd notes from the top"; "" for a staff's only part. */
+  function partPos(part) {
+    if (part === "upper") return "upper notes";
+    if (part === "lower") return "lower notes";
+    const m = /^(\d+)\/(\d+)$/.exec(part || "");
+    if (!m) return "";
+    const k = +m[1], n = +m[2];
+    if (k === 1) return "top notes";
+    if (k === n) return "bottom notes";
+    if (n === 3) return "middle notes";
+    return `${ordinal(k)} notes from the top`;
+  }
+  const capital = (t) => t.charAt(0).toUpperCase() + t.slice(1);
+
   function partLabel(sel) {
     if (!sel) return "Choose your part";
-    const pos = sel.part === "upper" ? "upper notes" : sel.part === "lower" ? "lower notes" : "";
+    const pos = partPos(sel.part);
     return `Your part: staff ${sel.staff || 1}${pos ? ", " + pos : ""}`;
   }
   function updatePartChip() {
@@ -648,9 +679,8 @@
   function partWords(sel) {
     const label = Parts.staffLabel(S.analysis, sel.staff);
     const staff = `the ${ordinal(sel.staff || 1)} staff from the top${label ? ` (“${label}”)` : ""}`;
-    if (sel.part === "upper") return `the upper notes on ${staff}`;
-    if (sel.part === "lower") return `the lower notes on ${staff}`;
-    return staff;
+    const pos = partPos(sel.part);
+    return pos ? `the ${pos} on ${staff}` : staff;
   }
 
   function confirmBanner() {
@@ -683,11 +713,18 @@
 
   function choosePart(li, si, e) {
     closePopover();
-    const staffNum = si + 1;
-    const opts = Parts.lines(S.analysis, staffNum);
+    // every part printed on this staff here (it may hold the song's staves for several parts)
+    const opts = [].concat(...songStavesOn(li, si).map((st) => Parts.lines(S.analysis, st)));
     if (!opts.length) { toast("No notes were read on that staff. Try another line or staff."); return; }
+    const several = new Set(opts.map((o) => o.staff)).size > 1;
+    const optName = (o) => {
+      const pos = partPos(o.part);
+      if (!several) return capital(pos);
+      const who = o.label || `Staff ${o.staff}`;
+      return pos ? `${who}, ${pos}` : who;
+    };
     const pick = (o) => {
-      S.prefs.sel = { staff: staffNum, part: o.part, confirmed: true, mapped: true };
+      S.prefs.sel = { staff: o.staff, part: o.part, confirmed: true, mapped: true };
       syncTransposition();
       S.picking = false;
       closePopover();
@@ -700,14 +737,16 @@
     if (opts.length === 1) return pick(opts[0]);
     popover = document.createElement("div");
     popover.className = "popover";
-    popover.innerHTML = `<p>Two parts share this staff. Which is yours?</p>` + opts.map((o, i) => `
-      <div class="row"><button class="pill small" data-hear="${i}">▶ Hear</button><button class="pill small solid" data-pick="${i}">${o.part === "upper" ? "Upper notes" : "Lower notes"}</button></div>`).join("");
+    const count = ["", "One", "Two", "Three", "Four", "Five", "Six"][opts.length] || String(opts.length);
+    popover.innerHTML = `<p>${count} parts share this staff. Which is yours?</p>` + opts.map((o, i) => `
+      <div class="row"><button class="pill small" data-hear="${i}">▶ Hear</button><button class="pill small solid" data-pick="${i}">${esc(optName(o))}</button></div>`).join("");
     document.body.append(popover);
-    const x = Math.min(window.innerWidth - 270, e.clientX + 12), y = Math.min(window.innerHeight - 200, e.clientY + 12);
+    const x = Math.min(window.innerWidth - 270, e.clientX + 12);
+    const y = Math.max(8, Math.min(window.innerHeight - popover.offsetHeight - 8, e.clientY + 12));   // more parts, a taller list
     popover.style.left = x + "px";
     popover.style.top = y + "px";
     $$("[data-pick]", popover).forEach((b) => (b.onclick = () => pick(opts[+b.dataset.pick])));
-    $$("[data-hear]", popover).forEach((b) => (b.onclick = () => hearSel({ staff: staffNum, part: opts[+b.dataset.hear].part }, li)));
+    $$("[data-hear]", popover).forEach((b) => (b.onclick = () => hearSel({ staff: opts[+b.dataset.hear].staff, part: opts[+b.dataset.hear].part }, li)));
   }
 
   /** Play a few bars of a part on its own. */
