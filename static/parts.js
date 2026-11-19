@@ -11,15 +11,34 @@
   const FLATS = ["C", "D♭", "D", "E♭", "E", "F", "G♭", "G", "A♭", "A", "B♭", "B"];
   const pitchName = (p, flats = true) => (flats ? FLATS : SHARPS)[((p % 12) + 12) % 12] + (Math.floor(p / 12) - 1);
 
-  /** Tidy the reading for abcjs: drop blank lines (they end a tune) and `$` line-break marks. */
+  /**
+   * Tidy the reading for abcjs: drop blank lines (they end a tune) and `$` line-break marks.
+   * A tempo change inside the music ([Q:...]) is blanked out: abcjs would stretch the notes
+   * after it, out of step with the bars; the tempo is followed when playing instead (see
+   * tempoCurve). Where each one was is kept (tempoFields) for that.
+   */
+  const Q_FIELDS = new Map();             // sanitized text -> [{at, spec}]
   function sanitize(abc) {
     const lines = (abc || "")
       .replace(/\r/g, "")
       .split("\n")
       .filter((l) => l.trim() !== "" && !/^I:linebreak/.test(l));
-    return lines
+    let text = lines
       .map((l) => (/^([A-Za-z]:|%)/.test(l) ? l : l.replace(/("[^"]*")|\$/g, (m, q) => q || "")))
       .join("\n") + "\n";
+    const found = [];
+    const body = text.search(/^V:/m);
+    if (body >= 0) {
+      text = text.slice(0, body) + text.slice(body).replace(/\[Q:([^\]]*)\]/g, (m, spec, off) => {
+        found.push({ at: body + off, spec });
+        return " ".repeat(m.length);
+      });
+    }
+    if (found.length) {
+      if (Q_FIELDS.size > 20) Q_FIELDS.clear();
+      Q_FIELDS.set(text, found);
+    }
+    return text;
   }
 
   /** Header V: definitions and the %%score layout (which voices share a staff, which are piano). */
@@ -114,6 +133,7 @@
         clef: d.clef || (median(pitches) < 57 ? "bass" : "treble"),
         name: d.name,
         isPiano: piano.has(id) || /pian|pno|keyb|organ/i.test(d.name),
+        isPerc: isPercussion(d.clef, d.name),
         staff: staffOf[id] || i + 1,
         voiceOnStaff: staffVoices[staffOf[id]] ? staffVoices[staffOf[id]].indexOf(id) : 0,
         low: pitches[0], high: pitches[pitches.length - 1], median: median(pitches),
@@ -127,6 +147,9 @@
     analysis.staffNames = namesByStaff(analysis);
     return analysis;
   }
+
+  /** A percussion staff (body percussion, drums): rhythm only, nobody's part to sing. */
+  const isPercussion = (clef, name) => clef === "perc" || /perc|drum|body|\bB\.\s*P\.|clap|stomp|cajon|snare/i.test(name || "");
 
   /**
    * Instruments a player can choose, the words that name their staff in a score, how far they
@@ -288,6 +311,17 @@
     const blockStart = (at) => { let b = 0; for (const x of blocks) if (x <= at) b = x; return b; };
 
     const dynOn = {}, pinsOn = {};
+    const tempoMarks = [], holds = [];
+    const headQ = /^Q:(.*)$/m.exec(abc.split(/^V:/m)[0]);        // the opening tempo, if given
+    if (headQ && tempoBpm(headQ[1], true)) tempoMarks.push({ t: 0, bpm: tempoBpm(headQ[1], true) });
+    // tempo changes in the music (blanked out for abcjs): at the next note of their part
+    const locate = voiceLocator(abc);
+    for (const q of Q_FIELDS.get(abc) || []) {
+      const b = tempoBpm(q.spec, true);
+      const n = b && (analysis.notesByVoice[locate(q.at)] || []).filter((x) => x.endChar !== undefined && x.endChar > q.at)
+        .sort((x, y) => x.startChar - y.startChar)[0];
+      if (n) tempoMarks.push({ t: n.start, bpm: b });
+    }
     const add = (o, k, v) => (o[k] = o[k] || []).push(v);
 
     for (const id in analysis.notesByVoice) {
@@ -320,7 +354,8 @@
         if (prev) for (const q of prev) q.legato = min > 0;
         const stacc = decos.includes("staccato") || /\.\s*[=^_]*[A-Ga-g\[][^.]*$/.test(plain.slice(-12));
         const accent = decos.some((d) => d === "accent" || d === ">" || d === "emphasis") ? 4 : decos.includes("sfz") ? 7 : 0;
-        for (const q of g) { q.staccato = stacc; q.accentDb = accent; q.tenuto = decos.includes("tenuto"); q.legato = false; }
+        for (const q of g) { q.staccato = stacc; q.accentDb = accent; q.tenuto = decos.includes("tenuto"); q.legato = false; q.fermata = decos.includes("fermata"); }
+        if (texts.length) for (const q of g) q.texts = texts;        // "unison", "rit.", "div. 3 parts"…
         for (const d of decos) {
           if (DB[d] !== undefined) marks.push({ t: n.start, dyn: DB[d] });
           if (d === "<(" || d === "crescendo(") marks.push({ t: n.start, open: "<" });
@@ -329,6 +364,12 @@
           if (d === ">)" || d === "diminuendo)") marks.push({ t: n.start, close: ">" });
         }
         for (const tx of texts) for (const [rx, dir] of TEXT_PIN) if (rx.test(tx)) marks.push({ t: n.start, open: dir, text: true });
+        for (const tx of texts) {
+          const b = tempoBpm(tx, false);
+          if (b) tempoMarks.push({ t: n.start, bpm: b });
+          for (const [rx, kind] of TEMPO_WORDS) if (rx.test(tx)) { tempoMarks.push({ t: n.start, kind }); break; }
+        }
+        if (decos.includes("fermata")) for (const q of g) holds.push([q.start, q.start + q.duration]);
         prevEnd = n.endChar;
         prev = g;
       }
@@ -388,6 +429,67 @@
       curves[st] = levelCurve(dyns, pins);
     }
     analysis.levelDb = (staff, t) => (curves[staff] ? curves[staff](t) : DB.mf);
+    tempoCurve(analysis, tempoMarks, holds);
+  }
+
+  // ------------------------------------------------------------------ tempo
+  // The tempo as marked along the way: a new tempo (Q: or "♩ = 100"), rit./rall. (slowing
+  // down over a bar or two), accel., "slower"/"faster", "a tempo" (back to the last tempo
+  // marked) and fermatas (held about twice as long). As a rate against the opening tempo.
+  const TEMPO_WORDS = [
+    [/(^|[\s(])(a tempo|tempo i\b|tempo primo|tempo 1\b)/i, "atempo"],
+    [/(^|[\s(])(rit|ritard|ritardando|rall|rallentando|riten|ritenuto|allarg|allargando)(\.|\b)/i, "rit"],
+    [/(^|[\s(])accel/i, "accel"],
+    [/(^|[\s(])(slower|pi[uù] lento|meno mosso)\b/i, "slower"],
+    [/(^|[\s(])(faster|pi[uù] mosso|stringendo)\b/i, "faster"],
+  ];
+  /** Quarter notes a minute from "1/4=100", "3/8=60", "100" (a Q: field) or "♩ = c. 100" (text). */
+  function tempoBpm(text, field) {
+    const m = field ? /^\s*(?:"[^"]*"\s*)?(?:(\d+)\/(\d+)\s*=\s*)?(\d+)/.exec(text) : /=\s*(?:c(?:a)?\.?\s*)?(\d{2,3})\b/.exec(text);
+    if (!m) return null;
+    if (!field) return +m[1] * (/[♩q]\s*\.\s*=/.test(text) ? 1.5 : 1);
+    const beat = m[1] ? +m[1] / +m[2] : 0.25;
+    return +m[3] * beat * 4;
+  }
+  function tempoCurve(analysis, marks, holds) {
+    marks.sort((a, b) => a.t - b.t);
+    const seen = new Set();
+    const list = marks.filter((m) => { const k = m.t.toFixed(3) + (m.kind || m.bpm); if (seen.has(k)) return false; seen.add(k); return true; });
+    const firstBpm = (list.find((m) => m.bpm) || {}).bpm || null;
+    analysis.firstBpm = firstBpm;
+    const pts = [[0, 1]];
+    let cur = 1, marked = 1;
+    const at = (t) => {                    // the curve so far, at t
+      let i = 0;
+      while (i + 1 < pts.length && pts[i + 1][0] <= t + 1e-9) i++;
+      if (i + 1 >= pts.length) return pts[i][1];
+      const [ta, va] = pts[i], [tb, vb] = pts[i + 1];
+      return tb > ta ? va + (vb - va) * (t - ta) / (tb - ta) : vb;
+    };
+    const cut = (t) => { while (pts.length > 1 && pts[pts.length - 1][0] > t + 1e-9) pts.pop(); };
+    list.forEach((m, i) => {
+      const v = at(m.t);
+      cut(m.t);
+      pts.push([m.t, v]);
+      if (m.bpm) cur = marked = m.bpm / firstBpm;
+      else if (m.kind === "atempo") cur = marked;
+      else if (m.kind === "slower") cur = v * 0.85;
+      else if (m.kind === "faster") cur = v * 1.15;
+      else {                               // a gradual change, over the next two bars at most
+        const next = list.slice(i + 1).find((x) => x.t > m.t + 1e-6);
+        const end = Math.min(next ? next.t : Infinity, m.t + 2);
+        cur = v * (m.kind === "rit" ? 0.8 : 1.15);
+        pts.push([end, cur]);
+        return;
+      }
+      pts.push([m.t, cur]);
+    });
+    const spans = holds.sort((a, b) => a[0] - b[0]);
+    analysis.rate = (t) => {
+      let r = at(t);
+      if (spans.some(([a, b]) => t >= a - 1e-9 && t < b - 1e-9)) r *= 0.5;   // a fermata
+      return Math.max(0.2, r);
+    };
   }
 
   /** How long a note actually sounds: slurred notes join the next, staccato ones are short,
@@ -400,7 +502,13 @@
 
   function mapStaves(analysis, pageClefs) {
     const N = pageClefs.length;
-    const voices = analysis.parts;
+    // percussion staves aren't matched to page staves by clef (their clef isn't one); they
+    // get a staff number past the page's, so nobody's part is ever taken from them
+    const voices = analysis.parts.filter((p) => !p.isPerc);
+    analysis.parts.filter((p) => p.isPerc).forEach((p, i) => {
+      p.staff = N + 1 + i;
+      for (const n of analysis.notesByVoice[p.id]) n.staff = p.staff;
+    });
     const M = voices.length;
     if (!N || !M) return false;
     const INF = 1e9, SKIP = 20;
@@ -432,8 +540,8 @@
       for (const n of analysis.notesByVoice[p.id]) n.staff = p.staff;
     });
     const onStaff = {};
-    voices.forEach((p) => (onStaff[p.staff] = (onStaff[p.staff] || []).concat(p.id)));
-    voices.forEach((p) => (p.voiceOnStaff = onStaff[p.staff].indexOf(p.id)));
+    analysis.parts.forEach((p) => (onStaff[p.staff] = (onStaff[p.staff] || []).concat(p.id)));
+    analysis.parts.forEach((p) => (p.voiceOnStaff = onStaff[p.staff].indexOf(p.id)));
     analysis.pageClefs = pageClefs.slice();
     analysis.staffNames = namesByStaff(analysis);
     analysis.pageStaves = N;
@@ -447,10 +555,12 @@
     return names && names.length ? names.map((r) => PLURAL[r]).join(" & ") : "";
   }
 
-  /** Real parts only: drop stray voices with a handful of notes (usually misreads). */
+  /** Real parts only: drop stray voices with a handful of notes (usually misreads), and
+   *  percussion (nobody's part to sing or play by pitch). */
   function mainParts(analysis) {
-    const most = Math.max(0, ...analysis.parts.map((p) => p.count));
-    return analysis.parts.filter((p) => p.count >= Math.min(8, most) && p.count >= most * 0.08);
+    const pitched = analysis.parts.filter((p) => !p.isPerc);
+    const most = Math.max(0, ...pitched.map((p) => p.count));
+    return pitched.filter((p) => p.count >= Math.min(8, most) && p.count >= most * 0.08);
   }
 
   /** Every note printed on one staff, whichever voice the model put it in (no duplicates). */
@@ -467,6 +577,49 @@
       }
     }
     return out.sort((a, b) => a.start - b.start || a.pitch - b.pitch);
+  }
+
+  /**
+   * Stretches where one staff carries every singer: marked "unison", "all voices" or
+   * "div. 3 parts" while another sung staff has nothing (the whole choir written on one staff
+   * for a while). A stretch starts with the line where it's marked and goes on while that
+   * staff sings and another is silent. lines: [{start, end}] in order.
+   * Sets analysis.shared = [{staff, start, end, unison}].
+   */
+  const SHARED_CUE = /\b(unison|unis\.|all voices|all parts|everyone)\b|\bdiv(?:isi|\.)?\s*(?:a\s*)?\d\s*(?:parts|voices)\b/i;
+  function findShared(analysis, lines) {
+    analysis.shared = [];
+    const sung = [...new Set(mainParts(analysis).filter((p) => !p.isPiano).map((p) => p.staff))];
+    if (sung.length < 2) return analysis.shared;
+    const notesOf = {};
+    for (const st of sung) notesOf[st] = staffNotes(analysis, st);
+    let cur = null;
+    for (const L of lines) {
+      const inLine = (st) => notesOf[st].filter((n) => n.start >= L.start - 1e-6 && n.start < L.end - 1e-6);
+      const singing = sung.filter((st) => inLine(st).length);
+      const silent = sung.length - singing.length > 0;
+      const cued = singing.find((st) => inLine(st).some((n) => (n.texts || []).some((t) => SHARED_CUE.test(t))));
+      // a new marking ("unison", then "div. 3 parts") starts a new stretch
+      if (cur && silent && singing.includes(cur.staff) && cued === undefined) {
+        cur.end = L.end;
+        continue;
+      }
+      cur = null;
+      if (cued !== undefined && silent) {
+        const t = inLine(cued).flatMap((n) => n.texts || []).filter((x) => SHARED_CUE.test(x)).join(" ");
+        cur = { staff: cued, start: L.start, end: L.end, unison: /unis|all voices|all parts|everyone/i.test(t) };
+        analysis.shared.push(cur);
+      }
+    }
+    return analysis.shared;
+  }
+
+  const inShared = (analysis, n) => (analysis.shared || []).some((s) => s.staff === n.staff && n.start >= s.start - 1e-6 && n.start < s.end - 1e-6);
+
+  /** A staff's notes outside the stretches where it carries the whole choir. */
+  function ownNotes(analysis, staff) {
+    const ns = staffNotes(analysis, staff);
+    return (analysis.shared || []).length ? ns.filter((n) => !inShared(analysis, n)) : ns;
   }
 
   /** Pitches sounding on the staff when note n starts (n included). */
@@ -683,9 +836,11 @@
       const pool = vocal.length ? vocal : mainParts(analysis);
       staves = [...new Set(pool.map((p) => p.staff))].sort((a, b) => a - b);
     }
+    const perc = new Set(analysis.parts.filter((p) => p.isPerc).map((p) => p.staff));
     const out = [];
     for (const staff of staves) {
-      const notes = staffNotes(analysis, staff);
+      if (perc.has(staff)) continue;
+      const notes = ownNotes(analysis, staff);
       if (!notes.length) continue;
       const label = staffLabel(analysis, staff);
       const n = partCount(notes);
@@ -714,7 +869,7 @@
       const mid = (inst.range[0] + inst.range[1]) / 2;
       let best = null, bestD = Infinity;
       for (const l of all) {
-        const ns = pickPart(staffNotes(analysis, l.staff), l.part);
+        const ns = pickPart(ownNotes(analysis, l.staff), l.part);
         if (!ns.length) continue;
         const ps = ns.map((n) => n.pitch).sort((a, b) => a - b);
         const shift = staffInstrument(analysis, l.staff) ? 0 : inst.t - writtenShift(analysis, l.staff);
@@ -783,7 +938,7 @@
     const lineOf = (t) => { let k = 0; starts.forEach((s, i) => { if (s <= t + 1e-6) k = i; }); return k; };
     for (const p of analysis.parts) {
       // only sung parts have a range this rule knows; for a player, only staves named as voices
-      if (p.isPiano || staffInstrument(analysis, p.staff)) continue;
+      if (p.isPiano || p.isPerc || staffInstrument(analysis, p.staff)) continue;
       if (isInstrument(who) && !((analysis.staffNames || {})[p.staff] || []).length) continue;
       const [lo, hi] = /^bass/.test(p.clef) ? [45, 64] : [57, 84];
       const byLine = {};
@@ -850,12 +1005,27 @@
   /** My notes, and everyone else's. */
   function divide(analysis, sel) {
     if (!sel || !sel.staff) return { mine: [], others: [].concat(...Object.values(analysis.notesByVoice)) };
-    const mine = pickPart(staffNotes(analysis, sel.staff), sel.part);
-    const mineKeys = new Set(mine.map((n) => n.start.toFixed(4) + "|" + n.pitch));
+    let mine = pickPart(ownNotes(analysis, sel.staff), sel.part);
+    // where one staff carries the whole choir, my part is on it: the same line for everyone
+    // in unison, else the part at my place in the choir (a bass: the bottom one)
+    if ((analysis.shared || []).length) {
+      const all = lines(analysis);
+      const n = Math.max(0, all.findIndex((l) => l.staff === sel.staff && partIndex(l.part, l.of) === partIndex(sel.part, l.of)));
+      const rank = all.length > 1 ? n / (all.length - 1) : 0;
+      for (const sh of analysis.shared) {
+        const ns = staffNotes(analysis, sh.staff).filter((x) => x.start >= sh.start - 1e-6 && x.start < sh.end - 1e-6);
+        const m = sh.unison ? 1 : partCount(ns);
+        const got = m <= 1 ? monophonic(ns, false) : pickPart(ns, `${Math.round(rank * (m - 1)) + 1}/${m}`);
+        mine = mine.concat(got);
+      }
+      mine.sort((a, b) => a.start - b.start);
+    }
+    const key = (n) => n.staff + "|" + n.start.toFixed(4) + "|" + n.pitch;
+    const mineKeys = new Set(mine.map(key));
     const others = [];
     for (const id in analysis.notesByVoice) {
       for (const n of analysis.notesByVoice[id]) {
-        if (n.staff === sel.staff && mineKeys.has(n.start.toFixed(4) + "|" + n.pitch)) continue;
+        if (mineKeys.has(key(n))) continue;
         others.push(n);
       }
     }
@@ -901,6 +1071,7 @@
     const levelDb = o.analysis.levelDb || (() => DB.mf);
     const PIANO = 0;
     const pianoIds = new Set(o.analysis.parts.filter((p) => p.isPiano).map((p) => p.id));
+    const percIds = new Set(o.analysis.parts.filter((p) => p.isPerc).map((p) => p.id));
 
     // Where a note falls in its bar. Bars come as {start, dur, first (first bar of a line)}.
     // A short first bar is a pick-up: its notes are the end of a bar, so they count from the
@@ -999,7 +1170,7 @@
       };
       const given = new Map();                                  // pitch -> is it mine
       for (const n of firstOf(mine)) given.set(n.pitch, true);
-      const vocalStaves = new Set(o.analysis.parts.filter((p) => !p.isPiano).map((p) => p.staff));
+      const vocalStaves = new Set(o.analysis.parts.filter((p) => !p.isPiano && !p.isPerc).map((p) => p.staff));
       for (const st of vocalStaves) {
         for (const n of firstOf(others.filter((x) => x.staff === st && !pianoIds.has(x.voice)))) {
           if (!given.has(n.pitch)) given.set(n.pitch, false);
@@ -1026,8 +1197,17 @@
 
     for (const n of minePlayed) music(o.inst.mine, n, mineVol, n.start + shift, Math.min(n.duration, o.b - n.start));
     // the other singers in their sound; the piano part on the piano, a little under them
+    // percussion on the woodblock, high and low strokes apart, under the singers
+    const percMid = (() => {
+      const ps = others.filter((n) => percIds.has(n.voice)).map((n) => n.pitch).sort((a, b) => a - b);
+      return ps.length ? ps[ps.length >> 1] : 0;
+    })();
     for (const n of others) {
       if (!inRange(n)) continue;
+      if (percIds.has(n.voice)) {
+        plain(115, n.pitch > percMid ? 72 : 65, othersVol * 0.45, n.start + shift, Math.min(n.duration, beatLen / 2));
+        continue;
+      }
       const piano = pianoIds.has(n.voice);
       music(piano ? PIANO : o.inst.others, n, othersVol * (piano ? 0.8 : 1), n.start + shift, Math.min(n.duration, o.b - n.start));
     }
@@ -1061,7 +1241,65 @@
         marks.total = marks.checkStart + beatLen * 2.5;
       }
     }
+    warp(o, notes, marks);
     return { notes, marks };
+  }
+
+  /**
+   * Play the pass at the tempo marked in the music (analysis.rate: rit., a new tempo, a
+   * fermata...). Pass times are in whole notes at the opening tempo; afterwards a note at
+   * score time t sits where the time before it, at its own tempo, has passed. The count-in
+   * goes at the tempo the pass starts in; the echo silence lasts as long as the music did.
+   * marks gets musicPos(t)/gapPos(t): the score time being played or echoed at pass time t.
+   */
+  function warp(o, notes, marks) {
+    const rate = o.analysis.rate;
+    if (!rate) {
+      marks.musicPos = (t) => o.from + (t - marks.musicStart);
+      marks.gapPos = (t) => o.a + (t - marks.gapStart);
+      return;
+    }
+    // time at the opening tempo to play score [a, b): a running total, worked out once
+    const STEP = 1 / 64;
+    const lo = Math.min(o.a, o.from), hi = Math.max(o.b, o.from) + STEP;
+    const cum = [0];
+    for (let t = lo; t < hi; t += STEP) cum.push(cum[cum.length - 1] + STEP / rate(t + STEP / 2));
+    const C = (t) => {
+      const x = Math.max(0, Math.min(cum.length - 1, (t - lo) / STEP));
+      const i = Math.min(cum.length - 2, Math.floor(x));
+      return i < 0 ? 0 : cum[i] + (cum[i + 1] - cum[i]) * (x - i);
+    };
+    const integral = (a, b) => C(b) - C(a);
+    const ms = marks.musicStart, me = marks.musicEnd;
+    const gs = marks.gapStart, ge = marks.gapEnd;
+    const r0 = rate(o.from), r1 = rate(Math.max(o.from, o.b - 1e-4));
+    // pass time -> played time, piece by piece (cached at the piece boundaries)
+    const W0 = ms / r0, W1 = W0 + integral(o.from, o.b);
+    const W2 = gs !== undefined ? W1 + integral(o.a, o.a + (ge - gs)) : W1;
+    const after = gs !== undefined ? ge : me;
+    const W = (p) => {
+      if (p <= ms) return p / r0;
+      if (p <= me) return W0 + integral(o.from, o.from + (p - ms));
+      if (gs !== undefined && p <= ge) return W1 + integral(o.a, o.a + (p - gs));
+      return W2 + (p - after) / r1;
+    };
+    for (const n of notes) {
+      const a = W(n.start), b = W(n.start + n.dur);
+      const k = n.dur > 0 ? (b - a) / n.dur : 1;
+      n.start = a;
+      n.dur = b - a;
+      if (n.env) n.env = n.env.map(([dt, g]) => [dt * k, g]);
+    }
+    const inverse = (t, lo, hi) => {      // the pass time played at t (W is increasing)
+      for (let i = 0; i < 40; i++) { const mid = (lo + hi) / 2; if (W(mid) < t) lo = mid; else hi = mid; }
+      return (lo + hi) / 2;
+    };
+    const raw = { ms, me, gs, ge, total: marks.total };
+    for (const k of ["countStart", "musicStart", "musicEnd", "gapStart", "gapEnd", "checkStart", "total"]) {
+      if (marks[k] !== undefined) marks[k] = W(marks[k]);
+    }
+    marks.musicPos = (t) => o.from + (inverse(t, raw.ms, raw.me) - raw.ms);
+    marks.gapPos = (t) => o.a + (inverse(t, raw.gs, raw.ge) - raw.gs);
   }
 
   /** Your first note at or after `from`. */
@@ -1070,6 +1308,6 @@
     return mine.find((n) => n.start >= (from || 0) - 1e-6) || null;
   }
 
-  return { sanitize, voiceDefs, voiceLocator, analyze, mainParts, lines, guessLine, divide,
+  return { findShared, ownNotes, sanitize, voiceDefs, voiceLocator, analyze, mainParts, lines, guessLine, divide,
            staffNotes, pickPart, assignParts, partCount, partIndex, expression, applyTransposition, writtenShift, staffInstrument, instrumentOf, isInstrument, INSTRUMENTS, sounded, staffLabel, applyVoicing, mapStaves, beatOf, buildPass, firstNote, pitchName, FADE, VOICE_RANK, MALE };
 });

@@ -193,3 +193,56 @@ test("count-in, clicks and strong beats follow each bar's time signature", () =>
   const mine = pass.notes.filter((n) => n.instrument === 71);
   assert.ok(mine[2].env[0][1] > mine[3].env[0][1]);
 });
+
+// ---------------------------------------------------------------- percussion, the whole choir on one staff, tempo
+const TTB_PERC = `X:1\nL:1/4\nM:4/4\nK:C\nV:1 treble-8 nm="Tenor 1"\nV:2 treble-8 nm="Tenor 2"\nV:3 bass nm="Bass"\nV:4 perc nm="B. P."\n%%score [1 2 3] 4\n` +
+  `[V:1] e f g a |\n[V:2] c d e f |\n[V:3] C, D, E, F, |\n[V:4] B B G B |\n`;
+
+test("a percussion staff is nobody's part, and plays on the woodblock", () => {
+  const { an, text } = load(TTB_PERC);
+  P.mapStaves(an, ["treble", "treble", "bass"]);
+  P.expression(an, text, [0]);
+  assert.deepStrictEqual(P.lines(an).map((l) => l.staff), [1, 2, 3]);
+  assert.strictEqual(P.guessLine(an, "Bass").staff, 3);
+  const pass = P.buildPass({ analysis: an, sel: { staff: 3, part: "all" }, a: 0, b: 1, from: 0, step: 2, round: 0,
+    vol: { mine: 0.9, others: 0.5 }, inst: { mine: 71, others: 52 }, beat: P.beatOf({ num: 4, den: 4 }),
+    countIn: false, clicks: false, bars: [{ start: 0, dur: 1, first: true }], phrasing: false });
+  const wood = pass.notes.filter((n) => n.instrument === 115);
+  assert.strictEqual(wood.length, 4);
+  assert.ok(pass.notes.filter((n) => n.instrument === 52).every((n) => n.pitch !== 71 || n.start > 0));
+});
+
+test("where one staff carries the whole choir, everyone's part is on it", () => {
+  const { an, text } = load(`X:1\nL:1/4\nM:4/4\nK:C\nV:1 treble-8 nm="T.T."\nV:2 bass nm="B.B."\n%%score 1 2\n` +
+    `[V:1] [ec] [fd] [ge] [fd] | "^All voices""^unison" c d e f | "^div. 3 parts" [gec] [afc] [bgd] [c'ge] | [ec] [fd] [ge] [fd] |\n` +
+    `[V:2] [G,C,] [A,D,] [B,E,] [A,D,] | z4 | z4 | [G,C,] [A,D,] [B,E,] [A,D,] |\n`);
+  P.mapStaves(an, ["treble", "bass"]);
+  P.expression(an, text, [0, 1, 2, 3]);
+  const shared = P.findShared(an, [0, 1, 2, 3].map((t) => ({ start: t, end: t + 1 })));
+  assert.deepStrictEqual(shared.map((x) => [x.staff, x.start, x.end, x.unison]), [[1, 1, 2, true], [1, 2, 3, false]]);
+  // the tenors' staff still has its two parts; the whole-choir bars don't count
+  assert.deepStrictEqual(P.lines(an).map((l) => l.staff + ":" + l.part), ["1:upper", "1:lower", "2:upper", "2:lower"]);
+  const bars = (sel, a, b) => P.divide(an, sel).mine.filter((n) => n.start >= a - 1e-9 && n.start < b - 1e-9).map((n) => n.pitch);
+  // the basses sing the unison, then the bottom of three
+  assert.deepStrictEqual(bars({ staff: 2, part: "lower" }, 1, 2), [60, 62, 64, 65]);
+  assert.deepStrictEqual(bars({ staff: 2, part: "lower" }, 2, 3), [60, 60, 62, 64]);
+  assert.deepStrictEqual(bars({ staff: 1, part: "upper" }, 2, 3), [67, 69, 71, 72]);
+});
+
+test("the music is played at the tempo marked along the way", () => {
+  const { an, text } = load(`X:1\nL:1/4\nM:4/4\nQ:1/4=100\nK:C\nV:1\n[V:1] c d e f | "^rit." g a b c' | "^a tempo" c d e !fermata!f | [Q:1/4=50] g a b c' |\n`);
+  P.mapStaves(an, ["treble"]);
+  P.expression(an, text, [0]);
+  // abcjs isn't left to stretch the notes after the tempo change: they stay in step with the bars
+  assert.deepStrictEqual(an.notesByVoice["1"].slice(-4).map((n) => n.start), [3, 3.25, 3.5, 3.75]);
+  assert.ok(an.rate(1.9) < 0.85 && an.rate(2) === 1 && an.rate(2.8) === 0.5 && an.rate(3.5) === 0.5);
+  const pass = P.buildPass({ analysis: an, sel: { staff: 1, part: "all" }, a: 0, b: 4, from: 0, step: 2, round: 0,
+    vol: { mine: 0.9, others: 0 }, inst: { mine: 71, others: 52 }, beat: P.beatOf({ num: 4, den: 4 }),
+    countIn: false, clicks: false, bars: [0, 1, 2, 3].map((t) => ({ start: t, dur: 1, first: t === 0 })), phrasing: false });
+  const starts = pass.notes.map((n) => +n.start.toFixed(3));
+  assert.deepStrictEqual(starts.slice(0, 5), [0, 0.25, 0.5, 0.75, 1]);       // the opening tempo
+  assert.ok(starts[7] - starts[6] > 0.27);                                  // slowing down
+  assert.ok(Math.abs(starts[12] - starts[11] - 0.5) < 1e-3);                 // the fermata, held twice as long
+  assert.ok(Math.abs(starts[13] - starts[12] - 0.5) < 1e-3);                 // half the tempo
+  assert.ok(Math.abs(pass.marks.musicPos(starts[13]) - 3.25) < 1e-3);        // and the screen follows
+});

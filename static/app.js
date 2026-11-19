@@ -287,7 +287,7 @@
     const song = S.song;
     $("#panel").hidden = false;
     $(".transport").hidden = false;
-    S.lines = song.lines || [];
+    S.lines = expandLines(song.lines || []);
     const abc = Parts.sanitize(song.abc || "");
     try {
       S.vo = ABCJS.parseOnly(abc)[0];
@@ -314,6 +314,8 @@
     if (ref) Parts.mapStaves(S.analysis, ref.staves.map((st) => st.clef));
     Parts.expression(S.analysis, abc, (S.lines || []).map((L) => L.start));
     buildBars();
+    // where one staff carries the whole choir for a while (unison, "div. 3 parts")
+    Parts.findShared(S.analysis, S.lines.filter((L, i) => playable(i)).map((L) => ({ start: L.start, end: L.start + L.bars.reduce((a, b) => a + b, 0) })));
     S.prefs = Object.assign({ step: 1, speed: 100, countIn: true, clicks: false, inst: { mine: 71, others: playing() ? 19 : 52 } }, song.settings || {});
     // Piano used to be the default for your part, but a piano note dies away, so you can't
     // hear how long it lasts. Move songs still on that old default to a sound that holds.
@@ -361,6 +363,51 @@
   }
 
   // ---------------------------------------------------------------- bars & time
+  /**
+   * The lines of music in the order they're sung. With repeats, a printed line (or part of it)
+   * is sung more than once: each run of its bars as sung is a line of its own here, sharing
+   * the printed line's place on the page (`src`: its index among the printed lines; `again`:
+   * every bar of it was sung before, so it isn't drawn or tapped twice). Each bar keeps its
+   * printed number (`p0` + k).
+   */
+  function expandLines(lines) {
+    const out = [];
+    let printed = 0;
+    lines.forEach((L, src) => {
+      const ok = L.start !== null && L.start !== undefined && L.bars && L.bars.length;
+      const p0 = printed + 1;
+      if (ok) printed += L.bars.length;
+      const plays = ok && L.plays && L.plays.length ? L.plays : null;
+      if (!plays || (plays.length === 1 && plays[0].from === 0 && plays[0].to === L.bars.length)) {
+        out.push({ ...L, src, p0 });
+        return;
+      }
+      const X = L.bounds || [];
+      const exact = X.length - 1 === L.bars.length;
+      const seen = new Set();
+      for (const r of plays) {
+        const ks = [];
+        for (let k = r.from; k < r.to; k++) ks.push(k);
+        out.push({
+          ...L, src, p0: p0 + r.from, start: r.start,
+          bars: L.bars.slice(r.from, r.to),
+          meters: L.meters && L.meters.length === L.bars.length ? L.meters.slice(r.from, r.to) : L.meters,
+          bounds: exact ? X.slice(r.from, r.to + 1) : X,
+          left: exact && r.from > 0 ? X[r.from] : L.left,
+          right: exact && r.to < L.bars.length ? X[r.to] : L.right,
+          again: ks.every((k) => seen.has(k)),
+        });
+        ks.forEach((k) => seen.add(k));
+      }
+    });
+    // in the order they're sung
+    return out.sort((a, b) => {
+      const sa = a.start === null || a.start === undefined ? Infinity : a.start;
+      const sb = b.start === null || b.start === undefined ? Infinity : b.start;
+      return sa - sb || a.src - b.src;
+    });
+  }
+
   function buildBars() {
     S.bars = [];
     let n = 0;
@@ -371,7 +418,7 @@
         // each bar's time signature (it can change, e.g. from 2/4 to 4/4); songs read before
         // this was recorded use the tune's
         const m = L.meters && L.meters.length === L.bars.length ? { num: L.meters[k][0], den: L.meters[k][1] } : null;
-        S.bars.push({ n: ++n, line: li, k, start: t, dur: d, ...(m ? Parts.beatOf(m) : {}) });
+        S.bars.push({ n: ++n, p: (L.p0 || 1) + k, line: li, k, start: t, dur: d, ...(m ? Parts.beatOf(m) : {}) });
         t += d;
       });
     });
@@ -519,7 +566,7 @@
               html += `<rect class="ol-range" x="${xa}" y="${top}" width="${Math.max(0, xb - xa)}" height="${h}"/>`;
             }
           }
-          const ms = myStaffOn(li);
+          const ms = L.again ? -1 : myStaffOn(li);      // a repeat's bars are shaded once
           if (ms >= 0) {
             // your part, shaded like a highlighter on your copy
             const st = L.staves[ms];
@@ -527,9 +574,14 @@
             const xl = L.left || x0, xr = L.right || x0 + w;
             html += `<rect class="ol-mystaff" x="${xl}" y="${st.top - pad}" width="${xr - xl}" height="${st.bottom - st.top + 2 * pad}" rx="6"/>`;
           }
-          html += `<rect class="ol-line" data-line="${li}" x="${x0}" y="${top}" width="${w}" height="${h}"/>`;
+          if (!L.again) {
+            // part of a line sung in pieces (a repeat inside it): only its own bars are tapped
+            const split = (L.plays || []).length > 1 && L.left !== undefined && L.right !== undefined;
+            const xl = split ? L.left : x0, xr = split ? L.right : x0 + w;
+            html += `<rect class="ol-line" data-line="${li}" x="${xl}" y="${top}" width="${xr - xl}" height="${h}"/>`;
+          }
         }
-        if (S.picking) {
+        if (S.picking && !L.again) {
           L.staves.forEach((st, si) => {
             pick += `<rect class="ol-staff" data-line="${li}" data-staff="${si}" x="${x0 + 6}" y="${st.y0}" width="${w - 12}" height="${st.y1 - st.y0}" rx="10"/>`;
           });
@@ -820,12 +872,13 @@
     const b0 = barAt(r.a), b1 = lastBar(r);
     if (!b0 || !b1) return { main: "—", sub: "" };
     const L0 = S.lines[b0.line], L1 = S.lines[b1.line];
-    const lineNo = (li) => S.lines.filter((L, i) => L.page === S.lines[li].page && i <= li).length;
+    // printed lines on the page, counted from the top (a repeat doesn't add a line)
+    const lineNo = (li) => new Set(S.lines.filter((L) => L.page === S.lines[li].page && L.src <= S.lines[li].src).map((L) => L.src)).size;
     const whole = Math.abs(r.a - S.bars[0].start) < EPS && Math.abs(r.b - S.total) < EPS;
-    const main = whole ? "Whole piece" : b0.n === b1.n ? `Bar ${b0.n}` : `Bars ${b0.n}–${b1.n}`;
+    const main = whole ? "Whole piece" : b0.n === b1.n ? `Bar ${b0.p}` : `Bars ${b0.p}–${b1.p}`;
     let sub = b0.line === b1.line ? `Page ${L0.page + 1}, line ${lineNo(b0.line)}` :
       `Page ${L0.page + 1} line ${lineNo(b0.line)} to page ${L1.page + 1} line ${lineNo(b1.line)}`;
-    if (whole) sub = `Bars 1–${S.bars.length}`;
+    if (whole) sub = `Bars 1–${Math.max(...S.bars.map((b) => b.p))}`;
     return { main, sub };
   }
 
@@ -847,18 +900,22 @@
     f.hidden = !f.hidden;
     if (!f.hidden) {
       const r = S.prefs.range;
-      $("#bar-from").value = barAt(r.a).n;
-      $("#bar-to").value = lastBar(r).n;
-      $("#bar-from").max = $("#bar-to").max = S.bars.length;
+      $("#bar-from").value = barAt(r.a).p;
+      $("#bar-to").value = lastBar(r).p;
+      $("#bar-from").max = $("#bar-to").max = Math.max(...S.bars.map((b) => b.p));
       $("#bar-from").focus();
     }
   };
   $("#bars-form").addEventListener("submit", (e) => {
     e.preventDefault();
-    let f = Math.max(1, Math.min(S.bars.length, +$("#bar-from").value || 1));
-    let t = Math.max(1, Math.min(S.bars.length, +$("#bar-to").value || f));
+    // printed bar numbers; a repeated bar: where it's first sung, through the first time the
+    // last bar is sung after it
+    const most = Math.max(...S.bars.map((b) => b.p));
+    let f = Math.max(1, Math.min(most, +$("#bar-from").value || 1));
+    let t = Math.max(1, Math.min(most, +$("#bar-to").value || f));
     if (t < f) [f, t] = [t, f];
-    const b0 = S.bars[f - 1], b1 = S.bars[t - 1];
+    const b0 = S.bars.find((b) => b.p >= f) || S.bars[0];
+    const b1 = S.bars.find((b) => b.n >= b0.n && b.p >= t) || S.bars[S.bars.length - 1];
     setRange({ a: b0.start, b: b1.start + b1.dur });
     $("#bars-form").hidden = true;
     scrollToLine(b0.line);
@@ -902,7 +959,7 @@
       html += `<div class="tl-tick" style="left:${pct(b.start)}%"></div>`;
       const page = S.lines[b.line].page;
       if (page !== lastPage) { html += `<div class="tl-page" style="left:${pct(b.start)}%">p.${page + 1}</div>`; lastPage = page; }
-      if (b.n === 1 || b.n % every === 0) html += `<div class="tl-bar" style="left:${pct(b.start)}%">${b.n}</div>`;
+      if (b.n === 1 || b.n % every === 0) html += `<div class="tl-bar" style="left:${pct(b.start)}%">${b.p}</div>`;
     }
     html += `<div class="tl-handle" data-h="a" style="left:${pct(r.a)}%"></div><div class="tl-handle" data-h="b" style="left:${pct(r.b)}%"></div>`;
     html += `<div class="tl-head" id="tl-head" style="left:${pct(S.pos !== null ? S.pos : S.from)}%"></div>`;
@@ -1047,6 +1104,8 @@
       const beat = t.duration && t.duration.length ? t.duration.reduce((a, b) => a + b, 0) : 0.25;
       return Math.round(t.bpm * beat * 4);
     }
+    // no tempo at the top: the first one marked along the way (the opening is played at it)
+    if (S.analysis && S.analysis.firstBpm) return Math.round(S.analysis.firstBpm);
     return 80;
   }
   /** Seconds per whole note at the chosen speed (bpm counts quarter notes). */
@@ -1104,8 +1163,8 @@
     const m = pass.marks;
     let phase, pos = null;
     if (t < m.musicStart) { phase = S.prefs.step === 5 && t < m.countStart ? "chord" : "count"; pos = pass.from; }
-    else if (t < m.musicEnd) { phase = "music"; pos = pass.from + (t - m.musicStart); }
-    else if (m.gapStart !== undefined && t < m.gapEnd) { phase = "echo"; pos = S.prefs.range.a + (t - m.gapStart); }
+    else if (t < m.musicEnd) { phase = "music"; pos = m.musicPos ? m.musicPos(t) : pass.from + (t - m.musicStart); }
+    else if (m.gapStart !== undefined && t < m.gapEnd) { phase = "echo"; pos = m.gapPos ? m.gapPos(t) : S.prefs.range.a + (t - m.gapStart); }
     else if (m.checkStart !== undefined) { phase = "check"; pos = null; }
     else { phase = "end"; pos = null; }
     S.phase = phase;

@@ -87,16 +87,22 @@ without music, like a cover, are left out; tap a page to change that. Pieces are
 3. **Line up.** Every part is measured bar by bar and lined up, so a misread note length can't
    push one part out of step (`app/abc_time.py`). Pick-ups, short bars at the end of a verse and
    stray rests at fermatas are recognized, and so are changes of time signature (2/4 to 4/4, say):
-   each bar is measured, counted in and clicked in its own.
+   each bar is measured, counted in and clicked in its own. Changes of key carry on to the lines
+   after them. Repeats and 1st/2nd endings are written out in the order they're sung, so the
+   bar lit up on the page is the one you hear (bars keep their printed numbers).
 4. **Find your part.** Parts are matched to the staves on the page by clef, using the line with
-   the most staves (other lines may print parts together, or only the piano). Any number of parts
+   the most staves. Other lines may leave out resting staves, print parts together, or only the
+   piano: their staves are matched by the part names printed on them ("basses"), clef and pitch.
+   Where one staff carries the whole choir for a while ("unison", "div. 3 parts"), everyone's
+   part comes from it. A percussion staff is nobody's part; it plays on a woodblock. Any number of parts
    written on one staff are separated, top to bottom, even where the number changes along the way:
    a divisi, or parts joining in unison. Sung lines read in the wrong octave are
    moved into the range singers on that clef actually sing, and parts for transposing instruments
    are played at the pitch they sound (`static/parts.js`).
 5. **Play.** A small sound engine (`static/synth.js`) gives every note its own loudness curve, so a
    crescendo keeps growing through a held note, using sampled sounds that hold as long as the note
-   is written.
+   is written. The tempo follows the score: a new tempo marked along the way, rit. and accel.,
+   "a tempo", and fermatas.
 
 The page geometry (staves, clefs, bar lines) comes from simple image analysis in `app/layout.py`.
 

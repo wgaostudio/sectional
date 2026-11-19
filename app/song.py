@@ -61,6 +61,7 @@ def build(page_dir: Path, pages: List[dict], units: List[dict], outputs: List[st
             "start": timing["start"] if timing else None,
             "bars": timing["bars"] if timing else [],
             "meters": timing.get("meters", []) if timing else [],     # each bar's time signature
+            "plays": timing.get("plays", []) if timing else [],       # where its bars are sung (repeats)
             **geo,
         })
     return {"abc": merged.abc, "lines": lines}

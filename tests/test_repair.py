@@ -35,3 +35,24 @@ def test_splice_fills_the_empty_part():
     out = splice(system, ["2"], reread, ["L:1/8", "K:C"], song_defs={"2": "bass"})
     assert out.startswith("% ok\n")
     assert "V:2\nC,8 |$" in out and "V:2x1" in out and "c8 |$" in out
+
+
+def test_a_staff_read_again_after_a_key_change_stays_in_the_new_key():
+    from app.repair import line_keys, splice
+    systems = {0: "X:1\nL:1/4\nK:F\nV:1\nf g a b |$\n%%score 1\n", 1: "V:1\n[K:G] g a b c |$\n%%score 1\n",
+               2: "% ok\nV:1 treble\nV:1\nx4 |$\n%%score 1\n"}
+    keys = line_keys(systems, "F")
+    assert keys == {0: ("F", "F"), 1: ("F", "G"), 2: ("G", "G")}
+    head = ["X:1", "L:1/4", "K:F"]
+    # read in the key it's in: nothing to add
+    assert "[K:" not in splice(systems[2], ["1"], "X:1\nL:1/4\nK:G\nV:1\nf g a b |$\n", head, keys=keys[2])
+    # misread in another key: put right for the line, and the song goes on in G (not back to F)
+    got = splice(systems[2], ["1"], "X:1\nL:1/4\nK:F\nV:1\nf g a b |$\n", head, keys=keys[2])
+    assert "[K:F]f g a b |[K:G]" in got
+
+
+def test_percussion_voices_are_not_matched_to_staves():
+    from app.repair import map_voices
+    defs = {"1": "treble-8", "2": "bass", "3": 'perc nm="B. P."'}
+    vmap, _ = map_voices(["1", "2", "3"], defs, {"1": 10, "2": 10, "3": 10}, ["treble", "bass", "treble"])
+    assert vmap == {"1": 0, "2": 1}

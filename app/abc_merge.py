@@ -13,6 +13,7 @@ finds those problems, keeps whatever is still usable, and lines voices up by sta
 from __future__ import annotations
 
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from fractions import Fraction
 from typing import Dict, List, Optional, Tuple
@@ -103,11 +104,11 @@ class System:
     score: Optional[str] = None
 
 
-_FIELD_LINE = re.compile(r"^\s*([MLK]):\s*(\S.*?)\s*$")
+_FIELD_LINE = re.compile(r"^\s*([MLKQ]):\s*(\S.*?)\s*$")
 
 
 def parse_system(text: str, first: bool) -> System:
-    """One system's output. A change of time signature (M:), note length (L:) or key (K:) is
+    """One system's output. A change of time signature (M:), note length (L:), key (K:) or tempo (Q:) is
     kept as an inline field ([M:4/4]) at the start of the music it applies to: written on a
     line of its own inside a part, or before the parts of a later system (which has no header)."""
     s = System()
@@ -316,31 +317,71 @@ def _is_piano(attrs: str) -> Optional[bool]:
     return None if not m else bool(re.search(r"pian|pno|keyb|organ", m.group(1), re.I))
 
 
-def _align_voices(s: System, ref_voices: List[Tuple[str, Optional[float], Optional[str], Optional[bool]]]) -> Dict[str, str]:
+def _is_perc(attrs: str) -> bool:
+    m = re.search(r'\bnm="([^"]*)"', attrs or "")
+    return bool(re.search(r"\bperc\b|clef=perc", attrs or "")) or bool(
+        m and re.search(r"perc|drum|body|\bB\.\s*P\.|clap|stomp|cajon|snare", m.group(1), re.I))
+
+
+# part names: (role, words anywhere, case-insensitive; short names, only in a staff's own
+# name and as written: "T 1", "B", "S" are names there, but "a tempo" isn't the altos)
+_ROLES = [("tenor", r"\bten(or)?s?\b|\bT\.\s*T\.", r"^T\.?\s*[12]?$|\bT[12]\b"),
+          ("baritone", r"barit|\bbar\.", r"^Bar\.?$"),
+          ("bass", r"\bbass(es|o|i)?\b|\bB\.\s*B\.", r"^B\.?\s*[12]?$|\bB[12]\b"),
+          ("soprano", r"\bsoprano?s?\b", r"^S\.?\s*[12]?$"),
+          ("alto", r"\baltos?\b", r"^A\.?\s*[12]?$"),
+          ("solo", r"small group|\bsol[oi]\b|\bsoloists?\b", r"^Solo$")]
+
+
+def _roles(attrs: str, lines: List[str]) -> set:
+    """Part names printed for a voice: its name (nm=, snm=) and the text written above or below
+    its first notes on this line ("basses", "T.T. (Bar.)", "Small Group")."""
+    names = [n.replace("\\n", " ").strip() for n in re.findall(r'\bs?nm="([^"]*)"', attrs or "")]
+    texts = re.findall(r'"[\^_<>@]?([^"]*)"', "\n".join(lines)[:300])
+    out = set()
+    for role, word, short in _ROLES:
+        if any(re.search(word, t, re.I) for t in names + texts) or any(re.search(short, n) for n in names):
+            out.add(role)
+    return out
+
+
+def _features(attrs: str, lines: List[str], roles: Optional[set] = None) -> dict:
+    med, clef = _median_pitch(lines), _clef_kind(attrs)
+    if med is not None and re.search(r"treble-8|clef=treble-8|\bmiddle=", attrs or ""):
+        med -= 12                         # a tenor staff: sounds an octave below what's written
+    if clef is None and med is not None:
+        clef = "bass" if med < 57 else "treble"
+    return {"med": med, "clef": clef, "piano": _is_piano(attrs), "perc": _is_perc(attrs),
+            "roles": _roles(attrs, lines) if roles is None else roles}
+
+
+def _align_voices(s: System, ref_voices: List[dict]) -> Dict[str, str]:
     """Match the voices of a system with fewer staves than the reference to the reference's
-    voices, top to bottom, by pitch, clef and (where named) piano. Two parts printed on one
-    staff here may be on two staves there, or a line may print only the piano.
-    ref_voices: (id, median pitch, clef, piano) top to bottom. Returns {voice: new id}."""
+    voices, top to bottom: by the part names printed on them (a staff marked "basses" is the
+    basses' even on a treble clef), pitch, clef, piano and percussion. Two parts printed on
+    one staff here may be on two staves there, or a line may print only the piano.
+    ref_voices: {id, med, clef, piano, perc, roles} top to bottom. Returns {voice: new id}."""
     mine = [v for st in staves(s.score, s.order) for v in st]
     M, K = len(mine), len(ref_voices)
     if not M or not K:
         return {}
-    feats = []
-    for v in mine:
-        med, clef = _median_pitch(s.voices.get(v, [])), _clef_kind(s.voice_defs.get(v, ""))
-        if clef is None and med is not None:
-            clef = "bass" if med < 57 else "treble"
-        feats.append((med, clef, _is_piano(s.voice_defs.get(v, ""))))
+    feats = [_features(s.voice_defs.get(v, ""), s.voices.get(v, [])) for v in mine]
 
     def cost(i, j):
-        (med, clef, piano), (_, rmed, rclef, rpiano) = feats[i], ref_voices[j]
+        a, r = feats[i], ref_voices[j]
         c = 0.0
-        if med is not None and rmed is not None:
-            c += min(12.0, abs(med - rmed) / 2)
-        if clef and rclef and clef != rclef:
+        if a["med"] is not None and r["med"] is not None:
+            c += min(12.0, abs(a["med"] - r["med"]) / 2)
+        if a["clef"] and r["clef"] and a["clef"] != r["clef"]:
             c += 6
-        if piano is not None and rpiano is not None and piano != rpiano:
+        if a["piano"] is not None and r["piano"] is not None and a["piano"] != r["piano"]:
             c += 10
+        if a["perc"] != r["perc"]:
+            c += 20
+        if a["roles"]:
+            # the reference's names, else what its clef says (a bass clef: basses, baritones)
+            theirs = r["roles"] or ({"bass", "baritone"} if r["clef"] == "bass" else {"tenor", "soprano", "alto"})
+            c += -4 if a["roles"] & theirs else 8
         return c
 
     SKIP, EXTRA, INF = 1.0, 8.0, float("inf")
@@ -363,7 +404,7 @@ def _align_voices(s: System, ref_voices: List[Tuple[str, Optional[float], Option
     out: Dict[str, str] = {}
     extra: Dict[str, int] = {}
     for i, v in enumerate(mine):
-        rid = ref_voices[at[i]][0]
+        rid = ref_voices[at[i]]["id"]
         if i and at[i] == at[i - 1]:
             extra[rid] = extra.get(rid, 0) + 1
             out[v] = f"{rid}x{extra[rid]}"
@@ -387,6 +428,161 @@ def _apply(s: System, mapping: Dict[str, str]) -> System:
     if s.score is not None:
         r.score = " ".join(mapping.get(t, t) for t in _TOK.findall(s.score))
     return r
+
+
+# ----------------------------------------------------------------------------
+# repeats: the music in the order it's sung
+# ----------------------------------------------------------------------------
+_CLOSE = re.compile(r"(::|:\|\]?|:\|\||\|:|\|\]|\|\||\[\||\|)\s*(\d[\d,\-]*)?$")
+_TAIL = re.compile(r'(\s|\$|\[[A-Za-z]:[^\]]*\]|"[^"]*"|![^!]*!)*$')
+_ENDING_AT_START = re.compile(r"\[(\d[\d,\-]*)")
+_PROTECT = re.compile(r'"[^"]*"|![^!]*!|\[[A-Za-z]:[^\]]*\]')
+
+
+def _numbers(text: str) -> set:
+    out = set()
+    for part in text.split(","):
+        a, _, b = part.partition("-")
+        if a.isdigit():
+            out.update(range(int(a), int(b) + 1) if b.isdigit() else {int(a)})
+    return out
+
+
+def _bar_marks(prev: Optional[str], seg: str, lead: int) -> Tuple[bool, bool, Optional[set]]:
+    """(a repeat starts at this bar, a repeat ends with it, the ending it starts: {1}, {2}...)."""
+    def close(t):
+        m = _CLOSE.search(_TAIL.sub("", t)) if t else None
+        return (m.group(1), m.group(2)) if m else ("", None)
+    p_tok, p_num = close(prev)
+    tok, _ = close(seg)
+    head = seg[:lead]
+    start = p_tok.endswith(":") or bool(re.search(r"\|:|::", head))
+    end = tok.startswith(":")
+    m = _ENDING_AT_START.search(head)
+    ending = _numbers(m.group(1)) if m else (_numbers(p_num) if p_num else None)
+    return start, end, ending or None
+
+
+def _plain_bars(seg: str) -> str:
+    """A bar with its repeat signs and ending numbers taken out (the repeat is written out)."""
+    def fix(t):
+        t = re.sub(r"\[\d[\d,\-]*", "", t)
+        t = re.sub(r":*\|\]", "|]", t)
+        t = re.sub(r"::|:+\|+:*|\|+:+", "|", t)
+        return re.sub(r"(\|\]?)\s*\d[\d,\-]*", r"\1", t)
+    out, last = [], 0
+    for m in _PROTECT.finditer(seg):
+        out.append(fix(seg[last:m.start()]))
+        out.append(m.group(0))
+        last = m.end()
+    out.append(fix(seg[last:]))
+    return "".join(out)
+
+
+def _unroll(order: List[str], header: List[str], systems: List[dict]) -> Optional[Tuple[Dict[str, List[str]], List[List[dict]]]]:
+    """Write repeats out: the music of every part in the order it's sung (a section twice, the
+    1st ending the first time, the 2nd the second), as abcjs plays it, so the bars the app
+    counts are the bars you hear. systems: in order, {aligned: {voice: lines}, units: {voice:
+    L: unit at its start}, bars: [lengths]}. Returns (music per part, per system the runs of
+    its bars as sung: [{start, from, to}]), or None if there are no repeats (or the parts'
+    bars can't be told apart, and the music is better left as printed)."""
+    from app.abc_time import split_bars
+
+    printed = []                                   # (system, bar) in printed order
+    segs: Dict[str, List[str]] = {v: [] for v in order}
+    marks = []
+    for si, sy in enumerate(systems):
+        n = len(sy["bars"])
+        per_voice = {}
+        for v in order:
+            text = "\n".join(sy["aligned"].get(v) or [])
+            evs: list = []
+            got, _, _ = split_bars(text, sy["units"][v], Fraction(1), evs)
+            if len(got) != n:
+                return None
+            per_voice[v] = (got, evs)
+        for k in range(n):
+            votes = []
+            for v in order:
+                got, evs = per_voice[v]
+                prev = got[k - 1] if k else (segs[v][-1] if segs[v] else None)
+                lead = min((e["lead"] for e in evs[k]), default=len(got[k]))
+                votes.append(_bar_marks(prev, got[k], lead))
+            need = max(1, len(votes) // 3)
+            start = sum(a for a, _, _ in votes) >= need
+            end = sum(b for _, b, _ in votes) >= need
+            ending = next((e for _, _, e in votes if e), None)     # often printed above one staff only
+            marks.append((start, end, ending))
+            printed.append((si, k))
+            for v in order:
+                segs[v].append(per_voice[v][0][k])
+    if not any(a or b or e for a, b, e in marks):
+        return None
+
+    # the order the bars are sung in
+    G = len(printed)
+    sung: List[int] = []
+    i, section, passn, ending, jumped = 0, 0, 1, None, set()
+    while i < G and len(sung) < 4 * G:
+        start, end, e = marks[i]
+        if start and not (i == section and passn > 1):
+            section, passn, ending = i, 1, None
+        if e is not None:
+            ending = e
+        skip = ending is not None and passn not in ending
+        if not skip:
+            sung.append(i)
+        if end and not skip:
+            if i not in jumped:
+                jumped.add(i)
+                passn += 1
+                ending = None
+                i = section
+                continue
+            section, passn, ending = i + 1, 1, None
+        elif skip and end:
+            ending = None
+        i += 1
+
+    # each part's music in that order; where it jumps back, the note length, time signature
+    # and key in force at that bar are stated again
+    fields = {"L": None, "M": None, "K": None}
+    for h in header:
+        if h[:2] in ("L:", "M:", "K:"):
+            fields[h[0]] = h[2:].strip()
+    music: Dict[str, List[str]] = {}
+    for v in order:
+        state, before = dict(fields), []
+        for g in range(G):
+            before.append(dict(state))
+            for f, val in re.findall(r"\[([LMK]):([^\]]*)\]", segs[v][g]):
+                state[f] = val.strip()
+        out, prev = [], None
+        for g in sung:
+            seg = _plain_bars(segs[v][g])
+            if prev is not None and g != prev + 1:
+                restate = "".join(f"[{f}:{before[g][f]}]" for f in "LMK" if before[g][f])
+                out.append("$\n" + restate + " ")
+            elif prev is not None and printed[g][0] != printed[prev][0]:
+                out.append("\n")                      # the next printed line
+            out.append(seg)
+            prev = g
+        text = "".join(out).rstrip()
+        music[v] = [l for l in (text if text.endswith("$") else text + " $").split("\n") if l.strip()]
+
+    # where each system's bars are sung
+    t = Fraction(0)
+    runs: List[List[dict]] = [[] for _ in systems]
+    for pos, g in enumerate(sung):
+        si, k = printed[g]
+        d = Fraction(systems[si]["bars"][k])
+        r = runs[si]
+        if r and r[-1]["to"] == k and sung[pos - 1] == g - 1:
+            r[-1]["to"] = k + 1
+        else:
+            r.append({"start": float(t), "from": k, "to": k + 1})
+        t += d
+    return music, runs
 
 
 # ----------------------------------------------------------------------------
@@ -440,11 +636,14 @@ def merge(outputs: List[str]) -> Merged:
     ref_voices = []
     for st in ref:
         for v in st:
-            meds = [m for m in (_median_pitch(s.voices.get(v, [])) for s in same) if m is not None]
             attrs = next((s.voice_defs[v] for s in same if v in s.voice_defs), "")
-            med = sorted(meds)[len(meds) // 2] if meds else None
-            clef = _clef_kind(attrs) or (None if med is None else "bass" if med < 57 else "treble")
-            ref_voices.append((v, med, clef, _is_piano(attrs)))
+            fs = [_features(attrs, s.voices.get(v, [])) for s in same]
+            meds = sorted(f["med"] for f in fs if f["med"] is not None)
+            f = _features(attrs, [], set().union(*(f["roles"] for f in fs)) if fs else set())
+            f.update(id=v, med=meds[len(meds) // 2] if meds else None)
+            if f["clef"] is None and f["med"] is not None:
+                f["clef"] = "bass" if f["med"] < 57 else "treble"
+            ref_voices.append(f)
     parsed = [s if (s is None or len(staves(s.score, s.order)) >= len(ref)) else _apply(s, _align_voices(s, ref_voices))
               for s in parsed]
     systems = [s for s in parsed if s]
@@ -494,12 +693,14 @@ def merge(outputs: List[str]) -> Merged:
     t = Fraction(0)
     cur = start
     declared = {v: start for v in order}       # the time signature each part last stated
+    per_system: List[dict] = []
     for i, s in enumerate(parsed):
         if s is None:
             timing.append(None)
             continue
         nxt = pickup[i + 1] if i + 1 < len(parsed) else None
         mi = {"start": cur}
+        units_at = dict(units)
         aligned, bars = align_system(s.voices, order, units, meter_len(cur),
                                      last_hint=nxt[1] - nxt[0] if nxt is not None else None, meters=mi)
         # every part states the time signature it is in: one whose reading missed a change at
@@ -511,6 +712,16 @@ def merge(outputs: List[str]) -> Merged:
                 head = re.match(r"\s*\[M:([^\]]*)\]", lines[0]) if lines else None
                 if lines and declared[v] != here and not head:
                     lines[0] = f"[M:{here[0]}/{here[1]}] " + lines[0].lstrip()
+        # a new key at the start of the line, read on some staves but not others: every part
+        # changes key (each staff prints its key signature; one missed is a misreading)
+        lead = {v: re.match(r"\s*(?:\[[A-Za-z]:[^\]]*\]\s*)*", (aligned.get(v) or [""])[0]).group(0) for v in order}
+        said = [m.group(1).strip() for v in order for m in [re.search(r"\[K:([^\]]*)\]", lead[v])] if m]
+        if said:
+            new_key = Counter(said).most_common(1)[0][0]
+            for v in order:
+                lines = aligned.get(v) or []
+                if lines and "[K:" not in lead[v]:
+                    lines[0] = f"[K:{new_key}] " + lines[0].lstrip()
         for v in order:
             for f in re.findall(r"\[M:([^\]]*)\]", "\n".join(aligned.get(v) or [])):
                 declared[v] = parse_meter(f) or declared[v]
@@ -520,9 +731,20 @@ def merge(outputs: List[str]) -> Merged:
             "bars": [float(b) for b in bars],
             "meters": [list(m) for m in mi["bars"]],
             "staves": staves(s.score, s.order),
+            "plays": [{"start": float(t), "from": 0, "to": len(bars)}],   # where it's sung
         })
+        per_system.append({"aligned": aligned, "units": units_at, "bars": bars, "timing": timing[-1]})
         t += sum(bars, Fraction(0))
         cur = mi["after"]
+
+    # repeats written out, so what's counted is what's heard
+    unrolled = _unroll(order, header, per_system)
+    if unrolled:
+        music, runs = unrolled
+        for sy, r in zip(per_system, runs):
+            sy["timing"]["plays"] = r
+            if r:
+                sy["timing"]["start"] = r[0]["start"]
 
     # Layout: the reference system's staves (its voices are the reference ids), with any
     # extra voices that were matched to a staff placed on that staff.

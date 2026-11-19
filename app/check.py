@@ -28,7 +28,7 @@ from PIL import Image
 
 from app.abc_merge import parse_system, tidy
 from app.abc_time import _parse_header, align_system, header_meter, meter_len, split_bars
-from app.repair import map_voices, note_count, reference_line, splice, staff_reading
+from app.repair import line_keys, map_voices, note_count, reference_line, splice, staff_reading
 
 log = logging.getLogger("sectional.check")
 
@@ -323,7 +323,8 @@ def check_song(song_dir: Path, meta: dict, engine, progress: Callable[[str, floa
     first = min(texts)
     head = parse_system(tidy(texts[first]), True)
     unit, _ = _parse_header(head.header)
-    set_key(next((h[2:].strip() for h in head.header if h.startswith("K:")), "C"))
+    song_key = next((h[2:].strip() for h in head.header if h.startswith("K:")), "C")
+    keys = line_keys(texts, song_key)            # the key can change along the way
     song_meter = header_meter(head.header)
     defs = dict(head.voice_defs)
     parsed = {k: parse_system(tidy(t), k == first) for k, t in texts.items()}
@@ -378,6 +379,7 @@ def check_song(song_dir: Path, meta: dict, engine, progress: Callable[[str, floa
         mine = [v for v in s.order if vmap.get(base(v)) == j and note_count(s.voices[v])]
         if not bars or not mine:
             continue
+        set_key(keys.get(k, (song_key, song_key))[0])
         context = {v: s.voices[v] for v in s.order if v not in mine}
         cands = [Reading.build("line", [s.voices[v] for v in mine], unit, meter, context)]
         picks, left = choose(cands, bars, beat)
@@ -423,9 +425,9 @@ def check_song(song_dir: Path, meta: dict, engine, progress: Callable[[str, floa
                 slots[i].append(segs[i] if i < len(segs) else f" {rest} |")
             t += d
         music = ["".join(sl).replace("$", "").rstrip() + " $" for sl in slots]
-        key = next((h[2:].strip() for h in head.header if h.startswith("K:")), "C")
+        key = keys.get(k, (song_key, song_key))[0]          # the bars are in the line's key
         fake = f"X:1\nL:{_fmt(unit)}\nK:{key}\n" + "".join(f"V:{i + 1}\n{m}\n" for i, m in enumerate(music))
-        new = splice(texts[k], mine, fake, head.header, first=(k == first), song_defs=defs)
+        new = splice(texts[k], mine, fake, head.header, first=(k == first), song_defs=defs, keys=keys.get(k))
         if not new:
             continue
         texts[k] = new

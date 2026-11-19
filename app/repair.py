@@ -49,10 +49,19 @@ def reference_line(lines: List[dict]) -> Optional[dict]:
     return best
 
 
+def is_percussion(attrs: str) -> bool:
+    """A percussion voice (body percussion, drums): rhythm only, not sung."""
+    m = _NAME.search(attrs or "")
+    return bool(re.search(r"\bperc\b|clef=perc", attrs or "")) or bool(
+        m and re.search(r"perc|drum|body|\bB\.\s*P\.|clap|stomp|cajon|snare", m.group(1), re.I))
+
+
 def map_voices(order: List[str], defs: Dict[str, str], counts: Dict[str, int],
                page_clefs: List[str]) -> Tuple[Dict[str, int], int]:
     """Match the reading's voices (in order) to the page's staves by clef; the same rule the
-    practice screen uses. Returns ({voice: staff index}, index of the first piano staff)."""
+    practice screen uses (percussion voices are left out: nobody sings them, and they aren't
+    checked or read again). Returns ({voice: staff index}, index of the first piano staff)."""
+    order = [v for v in order if not is_percussion(defs.get(v, ""))]
     N, M = len(page_clefs), len(order)
     if not N or not M:
         return {}, N
@@ -144,8 +153,10 @@ def find_missing(meta: dict, systems: Dict[int, str], page_images: Callable[[int
             continue
         typical = float(np.median(busy))
         for j in sung:
-            if notes_on[j] < 0.5 * bars and ink_on[j] > 0.35 * typical:
-                out.append({"line": k, "staff": j, "voices": [v for v in s.order if vmap.get(v) == j]})
+            voices = [v for v in s.order if vmap.get(v) == j]
+            # a staff no part was matched to (a percussion staff, say) has nothing to put back
+            if voices and notes_on[j] < 0.5 * bars and ink_on[j] > 0.35 * typical:
+                out.append({"line": k, "staff": j, "voices": voices})
     return out
 
 
@@ -219,9 +230,29 @@ def _field(header: List[str], key: str) -> Optional[str]:
     return None
 
 
+_KEY_FIELD = re.compile(r"\[K:\s*([^\]]+)\]")
+
+
+def line_keys(systems: Dict[int, str], song_key: str) -> Dict[int, Tuple[str, str]]:
+    """The key each line starts and ends in (the key can change along the way: F to G, say).
+    systems: line index -> that line's reading. A change is an inline [K:] field in its parts."""
+    out: Dict[int, Tuple[str, str]] = {}
+    cur = song_key
+    first = min(systems) if systems else 0
+    for k in sorted(systems):
+        s = parse_system(tidy(systems[k]), k == first)
+        found = [m.group(1).strip() for v in s.order for m in _KEY_FIELD.finditer("\n".join(s.voices[v]))]
+        end = found[-1] if found else cur
+        out[k] = (cur, end)
+        cur = end
+    return out
+
+
 def splice(system_text: str, voices: List[str], reread: str, song_header: List[str], first: bool = False,
-           song_defs: Optional[Dict[str, str]] = None) -> Optional[str]:
-    """Put the music read from the staff crop in place of the (empty) voices of that staff."""
+           song_defs: Optional[Dict[str, str]] = None, keys: Optional[Tuple[str, str]] = None) -> Optional[str]:
+    """Put the music read from the staff crop in place of the (empty) voices of that staff.
+    keys: the key the line starts and ends in (else the song's): the crop is read in the key
+    printed on it, and the music after it must go on in the key the line ends in."""
     new = parse_system(tidy(reread), True)
     parts = [v for v in new.order if note_count(new.voices[v]) > 0] or new.order
     if not parts or not voices:
@@ -229,12 +260,13 @@ def splice(system_text: str, voices: List[str], reread: str, song_header: List[s
     prefix = ""
     unit, key = _field(new.header, "L"), _field(new.header, "K")
     song_unit, song_key = _field(song_header, "L") or "1/8", _field(song_header, "K")
+    start_key, end_key = keys if keys else (song_key, song_key)
     if unit and unit != song_unit:
         prefix += f"[L:{unit}]"
     suffix = ""
-    if key and song_key and key.split()[0] != song_key.split()[0]:
+    if key and start_key and key.split()[0] != start_key.split()[0]:
         prefix += f"[K:{key}]"
-        suffix = f"[K:{song_key}]"
+        suffix = f"[K:{end_key}]"
     if unit and unit != song_unit:
         suffix += f"[L:{song_unit}]"
 
@@ -318,6 +350,7 @@ def repair_song(song_dir: Path, meta: dict, engine, progress: Callable[[str, flo
         return []
     head = parse_system(tidy(systems[min(systems)]), True)
     song_header, song_defs = head.header, head.voice_defs
+    keys = line_keys(systems, _field(song_header, "K") or "C")
     fixed = []
     by_line: Dict[int, str] = {}
     for n, item in enumerate(todo):
@@ -334,7 +367,8 @@ def repair_song(song_dir: Path, meta: dict, engine, progress: Callable[[str, flo
             log.info("Re-read of line %d staff %d doesn't fit the line's bars; kept the original", k + 1, j + 1)
             continue
         base = by_line.get(k, systems[k])
-        new = splice(base, item["voices"], abc, song_header, first=(k == min(systems)), song_defs=song_defs)
+        new = splice(base, item["voices"], abc, song_header, first=(k == min(systems)), song_defs=song_defs,
+                     keys=keys.get(k))
         if not new:
             continue
         by_line[k] = new

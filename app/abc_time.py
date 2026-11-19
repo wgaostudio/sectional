@@ -159,6 +159,11 @@ def split_bars(text: str, unit: Fraction, meter: Fraction = Fraction(1),
             end = m.end()
             while end < n and (text[end].isdigit() or text[end] in ",-"):   # volta numbers |1 :|2
                 end += 1
+            if dur == 0 and not cur and not in_overlay:
+                # nothing before this bar line (a line opening with "|:"): it isn't a bar; it
+                # goes with the bar after it
+                i = end
+                continue
             segments.append(text[start:end])
             durations.append(dur)
             bar_labels.append(bar_label or label)
