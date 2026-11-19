@@ -37,8 +37,29 @@ def _tuplet_q(p: int, compound: bool) -> int:
     return {2: 3, 3: 2, 4: 3, 6: 2, 8: 3}.get(p, 3 if compound else 2)
 
 
+Meter = Tuple[int, int]            # a time signature as printed: (6, 8) is not (3, 4)
+
+
+def parse_meter(v: str) -> Optional[Meter]:
+    """"3/4" -> (3, 4); "C" -> (4, 4); "C|" -> (2, 2); None if it isn't a time signature."""
+    v = (v or "").strip()
+    if v in ("C", "C|"):
+        return (4, 4) if v == "C" else (2, 2)
+    m = re.match(r"^\(?(\d+)(?:\+\d+)*\)?\s*/\s*(\d+)", v)
+    if not m:
+        return None
+    num = sum(int(x) for x in re.findall(r"\d+", v.split("/")[0]))
+    den = int(m.group(2))
+    return (num, den) if num > 0 and den > 0 else None
+
+
+def meter_len(m: Meter) -> Fraction:
+    return Fraction(m[0], m[1])
+
+
 def split_bars(text: str, unit: Fraction, meter: Fraction = Fraction(1),
-               events: Optional[list] = None) -> Tuple[List[str], List[Fraction], Fraction]:
+               events: Optional[list] = None, meters: Optional[dict] = None
+               ) -> Tuple[List[str], List[Fraction], Fraction]:
     """Split one part's music into bars.
 
     Returns (segments, durations, unit_after): each segment is the original text of a bar
@@ -49,6 +70,10 @@ def split_bars(text: str, unit: Fraction, meter: Fraction = Fraction(1),
     {lead, s, e, t0, t1, kind ('note'|'z'|'x'|'Z'), cut, tie}: offsets within the segment
     (lead = where its decorations start), start/end time within the bar, whether the bar
     may be split just before it, and whether it is tied to the next note.
+    meters: if given, {"start": the time signature in effect at the start (else taken from
+    `meter`)}; gets "bars" (each segment's time signature, the one in effect at its first
+    note or rest: the music may change time signature), "said" (per segment: whether this
+    text wrote that time signature, rather than carrying it on) and "after" (the one at the end).
     """
     segments: List[str] = []
     durations: List[Fraction] = []
@@ -61,6 +86,10 @@ def split_bars(text: str, unit: Fraction, meter: Fraction = Fraction(1),
     in_overlay = False
     cur: List[dict] = []
     lead: Optional[int] = None
+    label: Meter = (meters or {}).get("start") or (meter.numerator, meter.denominator)
+    bar_label: Optional[Meter] = None
+    bar_labels: List[Meter] = []
+    said, bar_said = False, []                   # has the text written a time signature yet
 
     def add(d: Fraction):
         nonlocal dur, tuplet_left, last_note, broken
@@ -75,7 +104,9 @@ def split_bars(text: str, unit: Fraction, meter: Fraction = Fraction(1),
         last_note = d
 
     def event(kind: str, s: int, e: int, t0: Fraction, cut: bool):
-        nonlocal lead
+        nonlocal lead, bar_label
+        if bar_label is None:
+            bar_label = label
         if not in_overlay:
             cur.append({"lead": (s if lead is None else lead) - start, "s": s - start, "e": e - start,
                         "t0": t0, "t1": dur, "kind": kind, "cut": cut,
@@ -118,15 +149,9 @@ def split_bars(text: str, unit: Fraction, meter: Fraction = Fraction(1),
                 except ValueError:
                     pass
             elif field.startswith("M:"):
-                v = field[2:].strip()
-                if v in ("C", "C|"):
-                    meter = Fraction(1)
-                elif "/" in v:
-                    try:
-                        a, b = v.split("/")
-                        meter = Fraction(int(a), int(b))
-                    except ValueError:
-                        pass
+                got = parse_meter(field[2:])
+                if got:
+                    label, meter, said = got, meter_len(got), True
             i = n if j < 0 else j + 1
             continue
         m = _BAR.match(text, i)
@@ -136,6 +161,9 @@ def split_bars(text: str, unit: Fraction, meter: Fraction = Fraction(1),
                 end += 1
             segments.append(text[start:end])
             durations.append(dur)
+            bar_labels.append(bar_label or label)
+            bar_said.append(said)
+            bar_label = None
             if events is not None:
                 events.append(cur)
             cur, lead = [], None
@@ -228,10 +256,15 @@ def split_bars(text: str, unit: Fraction, meter: Fraction = Fraction(1),
     if dur > 0 or re.search(r"[A-Ga-gzxZX]", _strip(re.sub(r"\[[A-Za-z]:[^\]]*\]", "", rest))):
         segments.append(rest)
         durations.append(dur)
+        bar_labels.append(bar_label or label)
+        bar_said.append(said)
         if events is not None:
             events.append(cur)
     elif segments:
         segments[-1] += rest           # trailing "$", spaces, line breaks belong to the last bar
+    if meters is not None:
+        meters["bars"], meters["said"], meters["after"] = bar_labels, bar_said, label
+        meters["said_after"] = said
     return segments, durations, unit
 
 
@@ -240,6 +273,15 @@ def _x(d: Fraction, unit: Fraction) -> str:
     if n.denominator == 1:
         return f"x{n.numerator}"
     return f"x{n.numerator}/{n.denominator}"
+
+
+def header_meter(header: List[str]) -> Meter:
+    """The time signature a tune starts in (4/4 if none is given)."""
+    got = None
+    for line in header:
+        if line.startswith("M:"):
+            got = parse_meter(line[2:]) or got
+    return got or (4, 4)
 
 
 def _parse_header(header: List[str]) -> Tuple[Fraction, Fraction]:
@@ -405,7 +447,7 @@ def _choose(lengths: List[Fraction], floor: Fraction, meter: Fraction,
 
 
 def align_system(voices: Dict[str, List[str]], order: List[str], units: Dict[str, Fraction],
-                 meter: Fraction, last_hint: Optional[Fraction] = None
+                 meter: Fraction, last_hint: Optional[Fraction] = None, meters: Optional[dict] = None
                  ) -> Tuple[Dict[str, List[str]], List[Fraction]]:
     """Make every part of one system have the same bars, each the same length.
 
@@ -417,17 +459,25 @@ def align_system(voices: Dict[str, List[str]], order: List[str], units: Dict[str
     `voices` maps id -> music lines for this system (missing/empty = silent here);
     `units` holds each part's current L: unit (updated in place for inline [L:] changes).
     `last_hint`: the length the last bar probably has (the next line starts with a pick-up).
+    `meters`: {"start": the time signature the system starts in}; gets "bars" (each bar's time
+    signature: it may change, e.g. from 2/4 to 4/4) and "after" (the one it ends in).
     Returns (new music lines per part, bar lengths).
     """
+    start: Meter = (meters or {}).get("start") or (meter.numerator, meter.denominator)
     parts: Dict[str, dict] = {}
     for v in order:
         text = "\n".join(voices.get(v) or [])
         if text.strip():
             evs: list = []
             u0 = units[v]
-            segs, durs, units[v] = split_bars(text, u0, meter, evs)
-            parts[v] = {"text": text, "segs": segs, "durs": durs, "evs": evs, "u0": u0}
+            mi = {"start": start}
+            segs, durs, units[v] = split_bars(text, u0, meter_len(start), evs, mi)
+            parts[v] = {"text": text, "segs": segs, "durs": durs, "evs": evs, "u0": u0,
+                        "labels": mi["bars"], "said": mi["said"], "after": mi["after"],
+                        "said_after": mi["said_after"]}
     if not parts:
+        if meters is not None:
+            meters["bars"], meters["after"] = [], start
         return {}, []
 
     # How many bars: the most bars that at least two parts with notes agree on.
@@ -436,15 +486,33 @@ def align_system(voices: Dict[str, List[str]], order: List[str], units: Dict[str
     need = min(2, len(with_notes))
     nbars = max((c for c, k in counts.items() if k >= need), default=max(counts))
 
+    # Each bar's time signature: what the parts say (most common), carried on from the bar before.
+    # A part whose reading wrote the time signature counts fully; one that only carried on the
+    # one before counts less (a reading misses a change more often than it makes one up).
+    def vote(votes: List[Tuple[Meter, bool]], before: Meter) -> Meter:
+        w: Dict[Meter, float] = {}
+        for m, wrote in votes:
+            w[m] = w.get(m, 0.0) + (1.0 if wrote else 0.6)
+        return max(w, key=lambda m: (w[m], m == before)) if w else before
+
+    full = [p for p in parts.values() if len(p["durs"]) == nbars]
+    labels: List[Meter] = []
+    for k in range(nbars):
+        before = labels[-1] if labels else start
+        labels.append(vote([(p["labels"][k], p["said"][k]) for p in (full or parts.values()) if k < len(p["labels"])], before))
+    after = vote([(p["after"], p["said_after"]) for p in (with_notes or parts.values())], labels[-1] if labels else start)
+    if meters is not None:
+        meters["bars"], meters["after"] = labels, after
+
     def bar_targets(group: List[dict]) -> List[Fraction]:
         out = []
         for k in range(nbars):
             lengths = [p["durs"][k] for p in group if _printed(p["evs"][k])]
             floor = max((_floor(p["durs"][k], p["evs"][k]) for p in group), default=Fraction(0))
-            out.append(_choose(lengths, floor, meter, last_hint if k == nbars - 1 else None))
+            out.append(_choose(lengths, floor, meter_len(labels[k]), last_hint if k == nbars - 1 else None))
         return out
 
-    targets = bar_targets([p for p in parts.values() if len(p["durs"]) == nbars])
+    targets = bar_targets(full)
 
     # Parts with a different number of bars: add the missing bar lines where they fall.
     times, t = [], Fraction(0)
@@ -457,7 +525,7 @@ def align_system(voices: Dict[str, List[str]], order: List[str], units: Dict[str
         new = _cut(p["text"], p["segs"], p["evs"], p["durs"], times, p["u0"])
         if new is not None:
             evs = []
-            segs, durs, _ = split_bars(new, p["u0"], meter, evs)
+            segs, durs, _ = split_bars(new, p["u0"], meter_len(start), evs)
             if len(durs) == nbars:
                 p.update(text=new, segs=segs, durs=durs, evs=evs)
 
@@ -473,17 +541,25 @@ def align_system(voices: Dict[str, List[str]], order: List[str], units: Dict[str
             if over > 0:
                 targets[-1] += over
 
+    # where the time signature changes, every part says so (a part that is silent here, or
+    # that the reading didn't give the change, would otherwise go on in the old one)
+    changes = {k for k in range(nbars) if labels[k] != (labels[k - 1] if k else start)}
+    field = lambda k: f"[M:{labels[k][0]}/{labels[k][1]}] "
+
     out: Dict[str, List[str]] = {}
     total = sum(targets, Fraction(0))
     for v in order:
         u = units[v]
         if v not in parts:
-            out[v] = [" " + " ".join(f"{_x(t, u)} |" for t in targets) + " $"]
+            out[v] = [" " + " ".join(f"{field(k) if k in changes else ''}{_x(t, u)} |" for k, t in enumerate(targets)) + " $"]
             continue
         p = parts[v]
         segs, durs, evs = p["segs"], p["durs"], p["evs"]
         if len(durs) == nbars:
             pieces = [_fit(segs[k], evs[k], durs[k], targets[k], u) for k in range(nbars)]
+            for k in changes:
+                if p["labels"][k] != labels[k]:
+                    pieces[k] = field(k) + pieces[k].lstrip()
         else:                       # couldn't line its bars up: at least end the line together
             pieces = list(segs[:-1])
             last = total - sum(durs[:-1], Fraction(0))

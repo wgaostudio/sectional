@@ -43,3 +43,13 @@ def test_tied_note_keeps_its_tie_when_padded():
     out, bars = align({"1": "A2 B2 c2 d2 | B8- |$", "2": "A,8 | B,6- |$"})
     assert bars == [4, 4]
     assert "B,6- |" in out["2"][0]
+
+
+def test_each_bar_has_its_time_signature():
+    from fractions import Fraction as F
+    from app.abc_time import parse_meter, split_bars
+    mi = {"start": (2, 4)}
+    _, durs, _ = split_bars("c d | [M:3/4] e f g | a2 z | [M:C] $", F(1, 4), F(1, 2), None, mi)
+    assert durs == [F(1, 2), F(3, 4), F(3, 4)]
+    assert mi["bars"] == [(2, 4), (3, 4), (3, 4)] and mi["after"] == (4, 4)
+    assert parse_meter("6/8") == (6, 8) and parse_meter("C|") == (2, 2) and parse_meter("2+3/8") == (5, 8)

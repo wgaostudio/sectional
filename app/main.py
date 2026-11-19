@@ -67,7 +67,8 @@ def write_meta(d: Path, meta: dict) -> None:
         tmp.replace(d / "meta.json")
 
 
-SONG_VERSION = 4   # 4: parts lined up by the most common bar length, pick-ups kept short
+SONG_VERSION = 5   # 4: parts lined up by the most common bar length, pick-ups kept short
+                   # 5: time signature changes; lines with fewer staves matched voice by voice
 
 
 def update_meta(d: Path, **changes) -> dict:

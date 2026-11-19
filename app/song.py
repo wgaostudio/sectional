@@ -60,6 +60,7 @@ def build(page_dir: Path, pages: List[dict], units: List[dict], outputs: List[st
             "status": u["status"] if timing else "failed",
             "start": timing["start"] if timing else None,
             "bars": timing["bars"] if timing else [],
+            "meters": timing.get("meters", []) if timing else [],     # each bar's time signature
             **geo,
         })
     return {"abc": merged.abc, "lines": lines}

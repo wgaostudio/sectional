@@ -27,7 +27,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 from PIL import Image
 
 from app.abc_merge import parse_system, tidy
-from app.abc_time import _parse_header, align_system, split_bars
+from app.abc_time import _parse_header, align_system, header_meter, meter_len, split_bars
 from app.repair import map_voices, note_count, reference_line, splice, staff_reading
 
 log = logging.getLogger("sectional.check")
@@ -232,12 +232,20 @@ def agreement(a: set, b: set) -> float:
     return 1.0 if not a and not b else len(a & b) / len(a | b)
 
 
-def choose(readings: List[Reading], bars: List[Fraction], beat: Fraction) -> Tuple[List[str], List[float]]:
-    """The reading to take each bar from, and how far the chosen bar still breaks the rules."""
+def beat_of(m) -> Fraction:
+    """The beat of a time signature (n, d): a dotted quarter in 6/8, 9/8, 12/8, else a quarter."""
+    return Fraction(3, 8) if m[1] == 8 and m[0] % 3 == 0 else Fraction(1, 4)
+
+
+def choose(readings: List[Reading], bars: List[Fraction], beat) -> Tuple[List[str], List[float]]:
+    """The reading to take each bar from, and how far the chosen bar still breaks the rules.
+    beat: one beat for every bar, or a list (one per bar: the time signature may change)."""
+    beats = list(beat) if isinstance(beat, (list, tuple)) else [beat] * len(bars)
     end = sum(bars, Fraction(0))
     picks, left = [], []
     t = Fraction(0)
     for k, d in enumerate(bars):
+        beat = beats[k] if k < len(beats) else beats[-1]
         t0, t1 = t, t + d
         t = t1
         usable = [r for r in readings if r.bar_text(t0, t1) is not None]
@@ -314,9 +322,9 @@ def check_song(song_dir: Path, meta: dict, engine, progress: Callable[[str, floa
         return {"fixed": [], "unsure": {}}
     first = min(texts)
     head = parse_system(tidy(texts[first]), True)
-    unit, meter = _parse_header(head.header)
+    unit, _ = _parse_header(head.header)
     set_key(next((h[2:].strip() for h in head.header if h.startswith("K:")), "C"))
-    beat = Fraction(1, 4) if meter.denominator <= 4 or meter.numerator % 3 else Fraction(3, 8)
+    song_meter = header_meter(head.header)
     defs = dict(head.voice_defs)
     parsed = {k: parse_system(tidy(t), k == first) for k, t in texts.items()}
     order, total = [], {}
@@ -360,6 +368,13 @@ def check_song(song_dir: Path, meta: dict, engine, progress: Callable[[str, floa
         L = lines[k]
         s = parsed[k]
         bars = [Fraction(b).limit_denominator(64) for b in L.get("bars") or []]
+        # each bar's time signature (it may change along the way; songs merged before this
+        # was recorded: the tune's)
+        ms = [tuple(m) for m in L.get("meters") or []]
+        if len(ms) != len(bars):
+            ms = [song_meter] * len(bars)
+        beat = [beat_of(m) for m in ms]
+        meter = meter_len(ms[0]) if ms else meter_len(song_meter)
         mine = [v for v in s.order if vmap.get(base(v)) == j and note_count(s.voices[v])]
         if not bars or not mine:
             continue

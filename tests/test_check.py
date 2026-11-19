@@ -57,3 +57,13 @@ def test_three_parts_on_a_staff_are_checked_as_three():
     # one of the three parts lost for half the bar
     bad = Reading.build("line", [["[ceg]8 | [dfa]4 [ce]4 |$"]], U, M)
     assert score_bar(bad, 1, F(1), F(2), part_count([bad, good], F(1), F(2)), BEAT, F(2))[0] > 0
+
+
+def test_the_beat_follows_the_time_signature():
+    from app.check import beat_of
+    assert beat_of((6, 8)) == F(3, 8) and beat_of((3, 4)) == F(1, 4) and beat_of((2, 2)) == F(1, 4)
+    # a line that changes from 2/4 to 6/8: each bar is checked in its own time
+    set_key("C")
+    line = Reading.build("line", [["c2 d2 | [M:6/8] c d e f g a |$"]], U, F(1, 2))
+    picks, left = choose([line], [F(1, 2), F(3, 4)], [F(1, 4), F(3, 8)])
+    assert left == [0, 0]

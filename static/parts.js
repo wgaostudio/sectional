@@ -875,14 +875,24 @@
   /**
    * One pass of a practice step over the range [a, b), starting at `from`.
    * opts: {analysis, sel, a, b, from, step (1–5), round, vol: {mine, others},
-   *        inst: {mine, others}, beat: {beats, beatLen}, countIn, clicks, bars: [{start, dur, first}], phrasing}
+   *        inst: {mine, others}, beat: {beats, beatLen}, countIn, clicks,
+   *        bars: [{start, dur, first, beats?, beatLen?}], phrasing}
+   * A bar's own beats/beatLen (from its time signature: it can change along the way) take the
+   * place of `beat` there; `beat` is for bars without (songs read before this was recorded).
    * Returns {notes, marks}: notes for the sound engine ({pitch, instrument, start, dur, env,
    * legato}, times in whole notes); marks gives (in whole notes from the start of the pass)
-   * musicStart/musicEnd, gapStart/gapEnd (echo), checkStart, total, and the my-part volume used.
+   * countStart (where the count-in starts: before it, the starting notes), musicStart/musicEnd,
+   * gapStart/gapEnd (echo), checkStart, total, and the my-part volume used.
    */
   function buildPass(o) {
     const { mine, others } = divide(o.analysis, o.sel);
-    const beatLen = o.beat.beatLen;
+    // the beat where the pass starts, for the count-in, the starting notes and the check note
+    const bars = (o.bars || (o.barStarts || []).map((s) => ({ start: s })))
+      .slice().sort((x, y) => x.start - y.start);
+    const barOf = (t) => { let b = null; for (const x of bars) { if (x.start <= t + 1e-6) b = x; else break; } return b; };
+    const beatAt = (t) => { const b = barOf(t); return b && b.beatLen ? { beats: b.beats, beatLen: b.beatLen } : o.beat; };
+    const startBeat = beatAt(o.from);
+    const beatLen = startBeat.beatLen;
     const notes = [];
     const plain = (instrument, pitch, gain, start, dur) => {
       if (gain > 0.001) notes.push({ pitch, instrument, start, dur, env: [[0, gain]] });
@@ -895,13 +905,10 @@
     // Where a note falls in its bar. Bars come as {start, dur, first (first bar of a line)}.
     // A short first bar is a pick-up: its notes are the end of a bar, so they count from the
     // bar's end (a one-beat pick-up in 4/4 is beat 4, not beat 1).
-    const bars = (o.bars || (o.barStarts || []).map((s) => ({ start: s })))
-      .slice().sort((x, y) => x.start - y.start);
-    const full = o.beat.beats * beatLen;
-    const barOf = (t) => { let b = null; for (const x of bars) { if (x.start <= t + 1e-6) b = x; else break; } return b; };
     const posInBar = (t) => {
       const b = barOf(t);
       if (!b) return t;
+      const bt = beatAt(t), full = bt.beats * bt.beatLen;
       if (b.dur !== undefined && b.first && b.dur < full - 1e-6) return full - (b.start + b.dur - t);
       return t - b.start;
     };
@@ -912,8 +919,8 @@
     // - Higher notes in a phrase come out a little more, lower ones a little less.
     // - A phrase (up to a rest or the end of the line) grows towards its middle and eases off
     //   at its end.
-    const N = o.beat.beats;
     const metricDb = (t) => {
+      const { beats: N, beatLen } = beatAt(t);
       const pos = posInBar(t);
       const k = pos / beatLen;
       const onBeat = Math.abs(k - Math.round(k)) < 1e-3;
@@ -944,7 +951,7 @@
       minePlayed.forEach((n, i) => {
         const prev = minePlayed[i - 1];
         const newLine = prev && lineStarts.some((s) => s > prev.start + 1e-6 && s <= n.start + 1e-6);
-        if (prev && (n.start - (prev.start + prev.duration) >= beatLen / 2 - 1e-6 || newLine)) flush();
+        if (prev && (n.start - (prev.start + prev.duration) >= beatAt(n.start).beatLen / 2 - 1e-6 || newLine)) flush();
         cur.push(n);
       });
       flush();
@@ -954,6 +961,7 @@
     // on through held notes), any accent (strongest at the start), and natural phrasing.
     const music = (instrument, n, vol, start, d) => {
       if (vol <= 0.001) return;
+      const beatLen = beatAt(n.start).beatLen;
       const len = sounded(n, d, beatLen);
       const settle = Math.min(len * 0.5, beatLen * 0.5);
       const shape = o.phrasing ? metricDb(n.start) : 0;
@@ -1001,10 +1009,11 @@
       order.forEach((p, i) => plain(PIANO, p, given.get(p) ? 0.55 : 0.4, i * beatLen, beatLen * 1.5));
       t0 = (order.length + 1) * beatLen;
     }
-    // count-in clicks
+    // count-in clicks, in the time signature the pass starts in
+    const countStart = t0;
     if (o.countIn || o.step === 5 || o.step === 1) {
-      for (let i = 0; i < o.beat.beats; i++) plain(115, i === 0 ? 76 : 77, 0.5, t0 + i * beatLen, beatLen / 2);
-      t0 += o.beat.beats * beatLen;
+      for (let i = 0; i < startBeat.beats; i++) plain(115, i === 0 ? 76 : 77, 0.5, t0 + i * beatLen, beatLen / 2);
+      t0 += startBeat.beats * beatLen;
     }
     const musicStart = t0;
     const shift = musicStart - o.from;
@@ -1023,13 +1032,14 @@
       music(piano ? PIANO : o.inst.others, n, othersVol * (piano ? 0.8 : 1), n.start + shift, Math.min(n.duration, o.b - n.start));
     }
 
-    const marks = { musicStart, musicEnd, total: musicEnd, mineVol };
+    const marks = { countStart, musicStart, musicEnd, total: musicEnd, mineVol };
     // beat clicks, with the first beat of each bar louder and higher
     const isDownbeat = (t) => Math.abs(posInBar(t)) < 1e-4;
     const clicksBetween = (from, to, offset) => {
-      for (let t = from; t < to - 1e-6; t += beatLen) {
+      for (let t = from, step; t < to - 1e-6; t += step) {
+        step = beatAt(t - offset).beatLen;               // each bar in its own time signature
         const one = isDownbeat(t - offset);
-        plain(115, one ? 76 : 77, one ? 0.4 : 0.2, t, beatLen / 2);
+        plain(115, one ? 76 : 77, one ? 0.4 : 0.2, t, step / 2);
       }
     };
     if (o.step === 5 || o.clicks) clicksBetween(musicStart, musicEnd, shift);

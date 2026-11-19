@@ -368,7 +368,10 @@
       if (L.start === null || L.start === undefined || !L.bars || !L.bars.length) return;
       let t = L.start;
       L.bars.forEach((d, k) => {
-        S.bars.push({ n: ++n, line: li, k, start: t, dur: d });
+        // each bar's time signature (it can change, e.g. from 2/4 to 4/4); songs read before
+        // this was recorded use the tune's
+        const m = L.meters && L.meters.length === L.bars.length ? { num: L.meters[k][0], den: L.meters[k][1] } : null;
+        S.bars.push({ n: ++n, line: li, k, start: t, dur: d, ...(m ? Parts.beatOf(m) : {}) });
         t += d;
       });
     });
@@ -1068,7 +1071,7 @@
       analysis: S.analysis, sel: S.prefs.sel, a: r.a, b: r.b, from, step: S.prefs.step, round,
       vol: S.prefs.vol, inst: { mine: +S.prefs.inst.mine, others: +S.prefs.inst.others },
       beat: Parts.beatOf(meter), countIn: S.prefs.countIn, clicks: S.prefs.clicks,
-      bars: S.bars.map((x) => ({ start: x.start, dur: x.dur, first: x.k === 0 })),
+      bars: S.bars.map((x) => ({ start: x.start, dur: x.dur, first: x.k === 0, beats: x.beats, beatLen: x.beatLen })),
       phrasing: S.prefs.phrasing !== false,
     });
     pass.from = from;
@@ -1100,7 +1103,7 @@
   function tick({ pass, t, round }) {
     const m = pass.marks;
     let phase, pos = null;
-    if (t < m.musicStart) { phase = S.prefs.step === 5 && t < m.musicStart - Parts.beatOf(S.vo.getMeterFraction()).beats * Parts.beatOf(S.vo.getMeterFraction()).beatLen ? "chord" : "count"; pos = pass.from; }
+    if (t < m.musicStart) { phase = S.prefs.step === 5 && t < m.countStart ? "chord" : "count"; pos = pass.from; }
     else if (t < m.musicEnd) { phase = "music"; pos = pass.from + (t - m.musicStart); }
     else if (m.gapStart !== undefined && t < m.gapEnd) { phase = "echo"; pos = S.prefs.range.a + (t - m.gapStart); }
     else if (m.checkStart !== undefined) { phase = "check"; pos = null; }

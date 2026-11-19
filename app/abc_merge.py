@@ -103,9 +103,16 @@ class System:
     score: Optional[str] = None
 
 
+_FIELD_LINE = re.compile(r"^\s*([MLK]):\s*(\S.*?)\s*$")
+
+
 def parse_system(text: str, first: bool) -> System:
+    """One system's output. A change of time signature (M:), note length (L:) or key (K:) is
+    kept as an inline field ([M:4/4]) at the start of the music it applies to: written on a
+    line of its own inside a part, or before the parts of a later system (which has no header)."""
     s = System()
     cur: Optional[str] = None
+    pending: List[str] = []           # fields before the parts of a later system
     for raw in text.replace("\r", "").split("\n"):
         line = raw.rstrip()
         if not line.strip():
@@ -124,13 +131,23 @@ def parse_system(text: str, first: bool) -> System:
             if attrs and cur not in s.voice_defs:
                 s.voice_defs[cur] = attrs
             continue
+        f = _FIELD_LINE.match(line)
         if cur is None:
             # before the first V: line. In the first system that is the tune header; keep
             # only well-formed fields (the model sometimes writes ":Copyright …").
             if first and (re.match(r"^[A-Za-z]:", line) or line.startswith("%")):
                 s.header.append(line)
+            elif f:
+                pending.append(f"[{f.group(1)}:{f.group(2)}]")
             continue
+        if f:                                         # "M:3/4" on its own inside a part
+            line = f"[{f.group(1)}:{f.group(2)}]"
         s.voices[cur].append(line)
+    if pending:
+        for v in s.order:
+            lines = s.voices[v]
+            if lines:
+                lines[0] = "".join(pending) + " " + lines[0].lstrip()
     return s
 
 
@@ -390,7 +407,7 @@ def merge_systems(outputs: List[str]) -> str:
 def merge(outputs: List[str]) -> Merged:
     """Merge per-system outputs (already checked) into one ABC tune, with every part lined
     up at every bar line, and report where each system sits in time."""
-    from app.abc_time import _parse_header, align_system
+    from app.abc_time import _parse_header, align_system, header_meter, meter_len, parse_meter
 
     parsed = []
     for i, t in enumerate(outputs):
@@ -455,31 +472,57 @@ def merge(outputs: List[str]) -> Merged:
 
     # A line that starts with a pick-up (a short first bar) usually follows a line whose
     # last bar is short by the same amount; that settles a last bar the parts disagree on.
-    pickup: List[Optional[Fraction]] = []
+    # The time signature can change along the way (2/4 to 4/4, say): it is carried from line to
+    # line, and each bar is measured against its own.
+    start = header_meter(header)
+    pickup: List[Optional[Tuple[Fraction, Fraction]]] = []     # (pick-up length, its full bar)
     units = {v: unit for v in order}
+    cur = start
     for s in parsed:
-        bars = align_system(s.voices, order, units, meter)[1] if s is not None else []
-        pickup.append(bars[0] if bars and bars[0] < meter else None)
+        if s is None:
+            pickup.append(None)
+            continue
+        mi = {"start": cur}
+        bars = align_system(s.voices, order, units, meter_len(cur), meters=mi)[1]
+        full = meter_len(mi["bars"][0]) if mi["bars"] else meter_len(cur)
+        pickup.append((bars[0], full) if bars and bars[0] < full else None)
+        cur = mi["after"]
 
     music: Dict[str, List[str]] = {v: [] for v in order}
     units = {v: unit for v in order}
     timing: List[Optional[dict]] = []
     t = Fraction(0)
+    cur = start
+    declared = {v: start for v in order}       # the time signature each part last stated
     for i, s in enumerate(parsed):
         if s is None:
             timing.append(None)
             continue
         nxt = pickup[i + 1] if i + 1 < len(parsed) else None
-        aligned, bars = align_system(s.voices, order, units, meter,
-                                     last_hint=meter - nxt if nxt is not None else None)
+        mi = {"start": cur}
+        aligned, bars = align_system(s.voices, order, units, meter_len(cur),
+                                     last_hint=nxt[1] - nxt[0] if nxt is not None else None, meters=mi)
+        # every part states the time signature it is in: one whose reading missed a change at
+        # the end of the line before gets it here
+        if mi["bars"]:
+            here = tuple(mi["bars"][0])
+            for v in order:
+                lines = aligned.get(v) or []
+                head = re.match(r"\s*\[M:([^\]]*)\]", lines[0]) if lines else None
+                if lines and declared[v] != here and not head:
+                    lines[0] = f"[M:{here[0]}/{here[1]}] " + lines[0].lstrip()
         for v in order:
+            for f in re.findall(r"\[M:([^\]]*)\]", "\n".join(aligned.get(v) or [])):
+                declared[v] = parse_meter(f) or declared[v]
             music[v].extend(aligned.get(v, []))
         timing.append({
             "start": float(t),
             "bars": [float(b) for b in bars],
+            "meters": [list(m) for m in mi["bars"]],
             "staves": staves(s.score, s.order),
         })
         t += sum(bars, Fraction(0))
+        cur = mi["after"]
 
     # Layout: the reference system's staves (its voices are the reference ids), with any
     # extra voices that were matched to a staff placed on that staff.

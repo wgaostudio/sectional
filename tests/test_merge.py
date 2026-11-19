@@ -43,3 +43,39 @@ def test_a_line_with_fewer_staves_keeps_each_part_on_its_own_id():
     assert "%%score [ 1 2 3 ] { 4 5 }" in m.abc
     body = m.abc.split("V:1\n", 1)[1]
     assert body.startswith(" x4 |")                       # sopranos rest through the introduction
+
+
+TWO_FOUR = "X:1\nL:1/4\nM:2/4\nK:C\nV:1 treble\nV:2 bass\nV:1\nc d | e f |$\nV:2\nC, D, | E, F, |$\n%%score 1 2\n"
+
+
+def test_a_new_time_signature_before_the_parts_of_a_line():
+    later = "M:4/4\nV:1\nc d e z | f2 z2 |$\nV:2\nC,4 | F,2 z2 |$\n%%score 1 2\n"
+    m = merge([TWO_FOUR, later])
+    assert m.lines[0]["meters"] == [[2, 4], [2, 4]]
+    assert m.lines[1]["meters"] == [[4, 4], [4, 4]]
+    # a 4/4 bar ending in rests is a whole bar, not cut down to the 2/4 the tune began in
+    assert m.lines[1]["bars"] == [1.0, 1.0]
+    assert "[M:4/4] C,4 | F,2 z2 |" in m.abc
+
+
+def test_a_part_that_missed_the_change_is_given_it():
+    later = "V:1\n[M:4/4] c d e z | f2 z2 |$\nV:2\nC,4 | F,2 z2 |$\n%%score 1 2\n"
+    m = merge([TWO_FOUR, later])
+    assert m.lines[1]["bars"] == [1.0, 1.0]
+    assert m.abc.count("[M:4/4]") == 2
+
+
+def test_a_change_at_the_end_of_a_line_starts_the_next():
+    mid = "V:1\nc d | e f | [M:3/4] $\nV:2\nC, D, | E, F, |$\n%%score 1 2\n"
+    last = "V:1\nc d e | f2 z |$\nV:2\nC,3 | F,2 z |$\n%%score 1 2\n"
+    m = merge([TWO_FOUR, mid, last])
+    assert m.lines[1]["meters"] == [[2, 4], [2, 4]]
+    assert m.lines[2]["meters"] == [[3, 4], [3, 4]] and m.lines[2]["bars"] == [0.75, 0.75]
+    assert "[M:3/4] C,3 |" in m.abc
+
+
+def test_a_change_inside_a_line_and_compound_time_kept_apart():
+    later = "V:1\nc d | [M:6/8] c/ d/ e/ f/ g/ a/ |$\nV:2\nC, D, | [M:6/8] C,3/2 F,3/2 |$\n%%score 1 2\n"
+    m = merge([TWO_FOUR, later])
+    assert m.lines[1]["meters"] == [[2, 4], [6, 8]]
+    assert m.lines[1]["bars"] == [0.5, 0.75]

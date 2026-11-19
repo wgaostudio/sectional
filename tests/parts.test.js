@@ -171,3 +171,25 @@ test("a stray chord here and there doesn't make another part", () => {
   P.mapStaves(an, ["treble"]);
   assert.deepStrictEqual(P.lines(an).map((l) => l.part), ["all"]);
 });
+
+// ---------------------------------------------------------------- a change of time signature
+test("count-in, clicks and strong beats follow each bar's time signature", () => {
+  const { an, text } = load(`X:1\nL:1/4\nM:2/4\nK:C\nV:1 treble\n[V:1] c d | [M:4/4] e f g a |$\n`);
+  P.mapStaves(an, ["treble"]);
+  P.expression(an, text, [0]);
+  const bars = [{ start: 0, dur: 0.5, first: true, ...P.beatOf({ num: 2, den: 4 }) },
+                { start: 0.5, dur: 1, ...P.beatOf({ num: 4, den: 4 }) }];
+  const pass = P.buildPass({ analysis: an, sel: { staff: 1, part: "all" }, a: 0, b: 1.5, from: 0, step: 2, round: 0,
+    vol: { mine: 0.9, others: 0 }, inst: { mine: 71, others: 52 }, beat: P.beatOf({ num: 4, den: 4 }),
+    countIn: true, clicks: true, bars, phrasing: true });
+  const clicks = pass.notes.filter((n) => n.instrument === 115);
+  const m = pass.marks;
+  // a count-in of two beats: the pass starts in 2/4
+  assert.strictEqual(m.musicStart - m.countStart, 0.5);
+  // beats in the music: 2 in the 2/4 bar, then 4; the first of each bar is the high click
+  const inMusic = clicks.filter((c) => c.start >= m.musicStart - 1e-9).map((c) => [+(c.start - m.musicStart).toFixed(3), c.pitch]);
+  assert.deepStrictEqual(inMusic, [[0, 76], [0.25, 77], [0.5, 76], [0.75, 77], [1, 77], [1.25, 77]]);
+  // the first beat of the 4/4 bar leans in more than its second beat
+  const mine = pass.notes.filter((n) => n.instrument === 71);
+  assert.ok(mine[2].env[0][1] > mine[3].env[0][1]);
+});

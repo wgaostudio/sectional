@@ -86,7 +86,8 @@ without music, like a cover, are left out; tap a page to change that. Pieces are
    two agree on.
 3. **Line up.** Every part is measured bar by bar and lined up, so a misread note length can't
    push one part out of step (`app/abc_time.py`). Pick-ups, short bars at the end of a verse and
-   stray rests at fermatas are recognized.
+   stray rests at fermatas are recognized, and so are changes of time signature (2/4 to 4/4, say):
+   each bar is measured, counted in and clicked in its own.
 4. **Find your part.** Parts are matched to the staves on the page by clef, using the line with
    the most staves (other lines may print parts together, or only the piano). Any number of parts
    written on one staff are separated, top to bottom, even where the number changes along the way:
